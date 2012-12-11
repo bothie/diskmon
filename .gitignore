@@ -1,0 +1,13 @@
+bdev/bdev_autogen.[ch]
+
+Makefile.stderr
+
+*.c.d
+
+*.o
+*.a
+*.so
+
+checker
+lvm-conf-extractor/lvm-conf-extractor
+lvm-conf-extractor/lvm-conf-extractor-static
