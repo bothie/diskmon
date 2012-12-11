@@ -27,6 +27,8 @@ TOPDIR   = .
 THISDIR  = .
 
 BUILD_STATIC = false
+# Static link command:
+# g++ -static -pedantic -g -Wall -W -O3 -pg -pipe -L/usr/btmakefile/workarounds main.o -o checker -L btlib -L bdev -L bdev/raid6 -L bdev/lvm -L bdev/loop -L bdev/blindread -Wl,-whole-archive -l bdev -l raid6 -l lvm -l loop -l blindread -l bt -Wl,-no-whole-archive -lworkaround_big_files_bug -lBtLinuxLibrary -ldl
 
 SRCS = \
 	common.c \
@@ -37,9 +39,10 @@ SRCS = \
 SUBMAKES = \
 	chkraid6 \
 
+#	btlib \
+
 # bdev/dmcrypt needs crypt, so make crypt prior to bdev
 DIRS = \
-	btlib \
 	crypt \
 	bdev \
 	lvm-conf-extractor \

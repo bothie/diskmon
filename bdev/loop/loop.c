@@ -190,6 +190,14 @@ static bool loop_destroy(void * _private) {
 }
 
 static block_t loop_read(void * _private,block_t first,block_t num,unsigned char * data) {
+	/*
+	struct timespec time;
+	time.tv_sec=0;
+	time.tv_nsec=10*1000*1000;
+	if (nanosleep(&time,NULL)) {
+		eprintf("nanosleep: %s\n",strerror(errno));
+	}
+	*/
 	struct loop_dev * private=(struct loop_dev *)_private;
 	if ((first+num)>bdev_get_size(private->bdev)) {
 		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(private->bdev));
@@ -209,6 +217,7 @@ static block_t loop_read(void * _private,block_t first,block_t num,unsigned char
 	off_t r=read(private->fd,data,num*bdev_get_block_size(private->bdev));
 //	eprintf("Thread %i: releasing lock of device %s (%i) after success\n",gettid(),bdev_get_name(private->bdev),private->fd);
 	btlock_unlock(private->lock);
+	if (0)
 	bprintf(
 		"%s->loop::read(%llu,%llu)=%lli\n"
 		,bdev_get_name(private->bdev)
@@ -255,6 +264,7 @@ static block_t loop_write(void * _private,block_t first,block_t num,const unsign
 	off_t w=write(private->fd,data,num*bdev_get_block_size(private->bdev));
 //	eprintf("Thread %i: releasing lock of device %s (%i) after success\n",gettid(),bdev_get_name(private->bdev),private->fd);
 	btlock_unlock(private->lock);
+	if (0)
 	bprintf(
 		"%s->loop::write(%llu,%llu)=%lli\n"
 		,bdev_get_name(private->bdev)

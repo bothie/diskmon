@@ -31,11 +31,14 @@ SRCS = \
 	bdev.c \
 
 LIBTARGET = bdev
+# SOTARGET = bdev.so
 
 CPPFLAGS-bdev.o = -I..
 
-CPPFLAGS += -I$(TOPDIR)/btlib
-LDFLAGS += -L$(TOPDIR)/btlib -lbt -LBtLinuxLibrary -lBtLinuxLibrary
+CPPFLAGS += 
+# -I$(TOPDIR)/btlib
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+# -L$(TOPDIR)/btlib -lbt 
 
 include $(shell btmakefile --path)/Makefile.Include
 

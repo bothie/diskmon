@@ -29,12 +29,13 @@ THISDIR  = bdev/dc
 SRCS = \
 	dc.c \
 
+LIBTARGET = dc
 SOTARGET = dc.so
-SOFLAGS += -lbdev
+# SOFLAGS += -L.. -lbdev
 
 CFLAGS += -I.. -I../..
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L..
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
 
 include $(shell btmakefile --path)/Makefile.Include
 

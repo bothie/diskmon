@@ -61,7 +61,7 @@
 /*
  * Indirect public interface
  */
-static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,char * args);
+static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
 static bool initialized;
 
@@ -82,7 +82,7 @@ BDEV_FINI {
 /*
  * Implementation - everything non-public (except for init of course).
  */
-static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,char * args) {
+static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args) {
 	ignore(bdev_driver);
 	
 	char sbuffer[512];

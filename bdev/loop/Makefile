@@ -29,13 +29,16 @@ THISDIR  = bdev/loop
 SRCS = \
 	loop.c \
 
+LIBTARGET = loop
 SOTARGET = loop.so
-SOFLAGS += -L.. -lbdev
+# SOFLAGS += -L.. -lbdev
 
 CPPFLAGS-loop.o += -I.. -I../..
 
-CPPFLAGS += -I$(TOPDIR)/btlib
-LDFLAGS += -L$(TOPDIR)/btlib -lbt -LBtLinuxLibrary -lBtLinuxLibrary
+CPPFLAGS += 
+# -I$(TOPDIR)/btlib
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+# -L$(TOPDIR)/btlib -lbt
 
 include $(shell btmakefile --path)/Makefile.Include
 

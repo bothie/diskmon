@@ -10,7 +10,7 @@ struct bdev {
 	
 EOF
 	echo "#define BDEV_CLEAR_FUNCTION_POINTERS(bdev) do {\\" >&6
-	for name in destroy read write short_read
+	for name in destroy read write short_read mmapro mmaprw munmap
 	do
 		rettype=""
 		arglist=""
@@ -50,6 +50,27 @@ EOF
 				args=",first,num,data,error_map"
 				;;
 			
+			mmapro)
+				rettype="unsigned char *"
+				arglist=",block_t first,block_t num"
+				reterror="NULL"
+				args=",first,num"
+				;;
+			
+			mmaprw)
+				rettype="unsigned char *"
+				arglist=",block_t first,block_t num"
+				reterror="NULL"
+				args=",first,num"
+				;;
+			
+			munmap)
+				rettype="void"
+				arglist=",unsigned char * address,block_t num"
+				reterror=""
+				args=",address,num"
+				;;
+			
 			new)
 				rettype=""
 				arglist=""
@@ -82,9 +103,17 @@ EOF
 			echo -e  "\t\terrno=ENOSYS;"
 			echo -e  "\t\treturn $reterror;"
 			echo -e  "\t}"
-			echo -e  "\t$rettype retval=dev->$name(dev->private $args);"
+			echo -en "\t"
+			if test "$rettype" != "void"
+			then
+				echo -n "$rettype retval="
+			fi
+			echo -e  "dev->$name(dev->private $args);"
 			echo -e  "\t{ $cleanup_code }"
-			echo -e  "\treturn retval;"
+			if test "$rettype" != "void"
+			then
+				echo -e  "\treturn retval;"
+			fi
 			echo     "}"
 			echo
 			echo     "$typename bdev_get_$namefunc(struct bdev * dev) {"

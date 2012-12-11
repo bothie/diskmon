@@ -29,6 +29,7 @@ THISDIR  = bdev/dmcrypt
 SRCS = \
 	dmcrypt.c \
 
+LIBTARGET = dmcrypt
 SOTARGET = dmcrypt.so
 SOFLAGS += -lbdev -lcrypt -liv -lgcrypt
 

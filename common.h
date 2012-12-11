@@ -29,7 +29,8 @@ void print_progress_bar(struct progress_bar * progress_bar,unsigned long long nu
 void print_stalled_progress_bar(struct progress_bar * progress_bar,unsigned long long num);
 void progress_bar_free(struct progress_bar * pb);
 
-#define OPEN_PROGRESS_BAR_LOOP(_lines,_num,_max) { \
+#define OPEN_PROGRESS_BAR_LOOP(_lines,_num,_max) \
+{ \
 	unsigned long long _progress_bar_max=(_max); \
 	struct progress_bar * progress_bar=progress_bar_mk(_lines,_progress_bar_max); \
 	assert(progress_bar); \

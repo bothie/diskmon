@@ -95,6 +95,7 @@ struct pv_in_core {
 	block_t first_pe_start_block;
 	block_t pe_count;
 	range_vasiar_t free_ranges;
+	block_t dev_size;
 };
 
 struct lv_segments {
@@ -328,6 +329,7 @@ static char * unparse_config(struct conf * c) {
 			"\"\ndevice = \"%s\"\n"
 			"\n"
 			"status = [\"ALLOCATABLE\"]\n"
+//			"dev_size = %llu\n" // FIXME: Should be configurable
 			"pe_start = %llu\n"
 			"pe_count = %llu\n"
 			"}\n"
@@ -600,7 +602,19 @@ static struct conf * parse_config(const char * data) {
 			ERROR("Couldn't parse PV's device name.");
 			goto err;
 		}
-		SKIP_STRING("\n\nstatus = [\"ALLOCATABLE\"]\npe_start = ","Couldn't parse PV's config (status value).");
+		SKIP_STRING("\n\nstatus = [\"ALLOCATABLE\"]\n","Couldn't parse PV's config (status value).");
+		if (*p=='d') {
+			SKIP_STRING("dev_size = ","Couldn't parse PV's config (dev_size).");
+			STRTOLL(pv->dev_size,"Couldn't parse PV's dev_size.");
+			SKIP_STRING("\n","Couldn't parse PV's config (dev_size).");
+			if (!pv->dev_size) {
+				ERROR("Explicitely given dev_size MUST NOT be zero (but is).");
+				goto err;
+			}
+		} else {
+			pv->dev_size=0;
+		}
+		SKIP_STRING("pe_start = ","Couldn't parse PV's config (pe_start).");
 		STRTOLL(pv->first_pe_start_block,"Couldn't parse PV's first PE start block.");
 		SKIP_STRING("\npe_count = ","Couldn't parse PV's config.");
 		STRTOLL(pv->pe_count,"Couldn't parse PV's PE count.");
@@ -950,15 +964,20 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 			for (size_t i=0;i<s;++i) {
 				if (unlikely(!lvm->pv[0].conf[i])) {
 					ERROR("Unexpected NULL character in LV config space.");
-//					goto err;
+					goto err; // Warum war der auskommentiert?
 				}
 			}
 			if (lvm->pv[0].conf[s]) {
 				ERROR("No terminating NULL character in LV config space.");
-//				goto err;
+				goto err; // Warum war der auskommentiert?
 			}
 			lvm->conf=parse_config((char *)lvm->pv[0].conf);
 			if (!lvm->conf) goto err;
+			if (VAACCESS(lvm->conf->pv,0).dev_size
+			&&  VAACCESS(lvm->conf->pv,0).dev_size != bdev_get_size(lvm->bdev[0])) {
+				ERROR("Explicitely given dev_size doesn't match actual device size.");
+				goto err;
+			}
 			char * cmp=unparse_config(lvm->conf);
 			if (!cmp) {
 				ERROR("unparse_config failed.");

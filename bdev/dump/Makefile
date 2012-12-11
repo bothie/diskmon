@@ -18,33 +18,20 @@
 #
 ###############################################################################
 
-#package        = diskmon
-#copyrightyears = ????-2007
-#mainauthor     = Bodo Thiesen <bothie@gmx.de>
-
 MAKEFILE = Makefile
 TOPDIR   = ../..
-THISDIR  = crypt/cipher
+THISDIR  = bdev/dump
 
 SRCS = \
-	aes.c \
+	dump.c \
 
-lnaes:
-	@ln -sf aes.so aes128.so
-	@ln -sf aes.so aes192.so
-	@ln -sf aes.so aes256.so
+LIBTARGET = dump
+SOTARGET = dump.so
+# SOFLAGS += -L.. -lbdev
 
-real-all: lnaes
+CPPFLAGS += -I.. -I../..
 
-SOTARGET = aes.so
-SOFLAGS += -L.. -lcrypt
-
-CPPFLAGS-aes.o += -I.. -I ../..
-
-CPPFLAGS += 
-# -I$(TOPDIR)/btlib
 LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
-# -L$(TOPDIR)/btlib -lbt 
 
 include $(shell btmakefile --path)/Makefile.Include
 

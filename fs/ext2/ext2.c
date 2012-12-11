@@ -1,3 +1,4 @@
+#include <btatomic.h>
 #define _GNU_SOURCE
 
 #include "ext2.h"
@@ -14,18 +15,153 @@
 #include <fcntl.h>
 #include <mprintf.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <zlib.h>
+
+/*
+-1UL-(5UL*sc->table_reader_group) CAM[x]
+-2UL-(5UL*sc->table_reader_group) IAM[x]
+-3UL-(5UL*sc->table_reader_group) IT[x]
+-4UL-(5UL*sc->table_reader_group) SB[x]
+-5UL-(5UL*sc->table_reader_group) GDT[x]
+
+num_inodes+5*num_groups
+2^32
+
+8192 -> 2048
+2048*2048*2048
+8*1024^3=8GB
+-> pro Inode mehr als 2^32 cluster!
+
+epi=entries per inode (z.B. 256 für 1024 cluster size)
+0..11               -> Block im Inode
+12                  -> Dies ist sind (oder ein über diesen sind indizierter Cluster)
+13                  -> Dies ist dind
+14                  -> Dies ist tind
+13*epi^1+[0..epi)   -> Dies ist sind in dind(13) (oder ein über diesen sind indizierter Cluster)
+14*epi^1+[0..epi)   -> Dies ist dind in tind(14)
+14*epi^2+[0..epi^2) -> Dies ist sind in dind(tind(14)) (oder ein über diesen sind indizierter Cluster)
+0x80000001          -> Dies ist ein Cluster Allocation Map Cluster, inode nummer gibt Gruppe an
+0x80000002          -> Dies ist ein Inode Allocation Map Cluster, inode nummer gibt Gruppe an
+0x80000003-0x8....X -> Dies ist ein Inode Table Cluster, inode nummer gibt Gruppe an, dieser Wert -0x80000003 ist die relative Cluster nummer.
+0x8000000X+1        -> Dies ist ein Super block, inode nummer gibt Gruppe an, X=Anzahl Inode Table Clusters+2
+0x8000000X+2-0x8..Y -> Dies ist eine Gruppenbeschreibung, inode nummer gibt Gruppe an, Y=Anzahl Cluster für Gruppenbeschreibung+1+X
+*/
+
+#define BTCLONE
+#define COMC_IN_MEMORY
+
+/*
+#define PRINT_MARK_IT 1
+#define PRINT_MARK_IAM 1
+#define PRINT_MARK_CAM 1
+*/
+
+#ifdef PRINT_MARK_ALL
+#	ifndef PRINT_MARK_SB0GAP
+#		define PRINT_MARK_SB0GAP 1
+#	endif // #ifndef PRINT_MARK_SB0GAP
+#	ifndef PRINT_MARK_SB
+#		define PRINT_MARK_SB 1
+#	endif // #ifndef PRINT_MARK_SB
+#	ifndef PRINT_MARK_GDT
+#		define PRINT_MARK_GDT 1
+#	endif // #ifndef PRINT_MARK_GDT
+#	ifndef PRINT_MARK_CAM
+#		define PRINT_MARK_CAM 1
+#	endif // #ifndef PRINT_MARK_CAM
+#	ifndef PRINT_MARK_IAM
+#		define PRINT_MARK_IAM 1
+#	endif // #ifndef PRINT_MARK_IAM
+#	ifndef PRINT_MARK_IT
+#		define PRINT_MARK_IT 1
+#	endif // #ifndef PRINT_MARK_IT
+#else
+#	ifndef PRINT_MARK_SB0GAP
+#		define PRINT_MARK_SB0GAP 0
+#	endif // #ifndef PRINT_MARK_SB0GAP
+#	ifndef PRINT_MARK_SB 
+#		define PRINT_MARK_SB 0 
+#	endif // #ifndef PRINT_MARK_SB 
+#	ifndef PRINT_MARK_GDT
+#		define PRINT_MARK_GDT 0
+#	endif // #ifndef PRINT_MARK_GDT
+#	ifndef PRINT_MARK_CAM
+#		define PRINT_MARK_CAM 0
+#	endif // #ifndef PRINT_MARK_CAM
+#	ifndef PRINT_MARK_IAM
+#		define PRINT_MARK_IAM 0
+#	endif // #ifndef PRINT_MARK_IAM
+#	ifndef PRINT_MARK_IT
+#		define PRINT_MARK_IT 0
+#	endif // #ifndef PRINT_MARK_IT
+#endif // #ifdef PRINT_MARK_ALL
+
+#ifdef BTCLONE
 
 #include <linux/sched.h>
 extern int clone(int (*)(void *),void *,int,void *,...);
+#define THREAD_RETURN_TYPE int
+#define THREAD_RETURN() do { return 0; } while (0)
+
+#else // #ifdef BTCLONE
+
+#include <pthread.h>
+#define THREAD_RETURN_TYPE void * 
+#define THREAD_RETURN() do { return NULL; } while (0)
+
+#endif // #ifdef BTCLONE, else
+
+/*
+ * 295 threads (plus two or three or so) is a limit of valgrind
+ * Each thread needs 2 fds (for it's thread structure lock), and maybe 2 fds of the com_cache's lock this thread is wating for.
+ * The soft limit is hard limit minus 50 
+ * up to 448 com_cache entries make 896 fds for their locks.
+ * Sum is ~2000 which is way too much.
+ */
+
+/*
+unsigned hard_child_limit=294;
+unsigned soft_child_limit=244;
+
+#define MAX_COMC_IN_MEMORY 448
+#define MAX_COMC_DIRTY 384
+*/
+
+unsigned hard_child_limit=294;
+unsigned soft_child_limit=244;
+
+// #define MAX_COMC_IN_MEMORY 128
+// #define MAX_COMC_DIRTY 96
+#define MAX_COMC_IN_MEMORY 512
+#define MAX_COMC_DIRTY 448
+
+/*
+unsigned hard_child_limit=15;
+unsigned soft_child_limit=12;
+
+#define MAX_COMC_IN_MEMORY 32
+#define MAX_COMC_DIRTY 24
+*/
+
+#define MAX_INODE_TABLE_PREREADED 512
+#define PREREADED_NOTIFYTIME 10
+
+// #define INODE_TABLE_ROUNDROUBIN 0xffffffffLU
+#define INODE_TABLE_ROUNDROUBIN 512LU
 
 static inline int gettid() {
 	return syscall(SYS_gettid);
 }
+
+#ifdef BTCLONE
+#else // #ifdef BTCLONE
+#endif // #ifdef BTCLONE, else
 
 int btclone(void * * stack_memory,int (*thread_main)(void * arg),size_t stack_size,int flags,void * arg) {
 #if HAVE_LINUX_CLONE
@@ -62,8 +198,6 @@ int btclone(void * * stack_memory,int (*thread_main)(void * arg),size_t stack_si
 }
 
 volatile unsigned live_child;
-unsigned hard_child_limit=295;
-unsigned soft_child_limit=245;
 
 #define DRIVER_NAME "ext2"
 
@@ -171,6 +305,8 @@ struct inode_scan_context {
 	char * type;
 	unsigned type_bit;
 	bool is_dir;
+	block_t schedule_first_cluster;
+	unsigned long schedule_num_clusters;
 	
 	unsigned long illegal_ind_clusters[4];
 	unsigned long used_clusters;
@@ -199,8 +335,135 @@ struct dirent_list {
 	struct dirent_node * last;
 };
 
-#define MAX_PREREADED 512
-#define PREREADED_NOTIFYTIME 10
+// #include <atomic_ops.h>
+
+/*
+struct btlock_lock {
+	AO_t locked;
+	int fd_writer_side;
+	int fd_reader_side;
+};
+*/
+
+#define CC_DEBUG_LOCKS 0
+
+#define CL_LOCK(sc) do { \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Locking cluster allocation map\n",__LINE__,gettid()); \
+	} \
+	btlock_lock(sc->cam_lock); \
+} while (0)
+
+#define CL_UNLOCK(sc) do { \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Unlocking cluster allocation map\n",__LINE__,gettid()); \
+	} \
+	btlock_unlock(sc->cam_lock); \
+} while (0)
+
+#define CCT_WAIT() do { \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: cc thread - going to sleep\n",__LINE__,gettid()); \
+	} \
+	btlock_wait(sc->com_cache_thread_lock); \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: cc thread - resuming operation\n",__LINE__,gettid()); \
+	} \
+} while (0)
+
+#define CCT_WAKE() do { \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Waking up cc thread\n",__LINE__,gettid()); \
+	} \
+	btlock_wake(sc->com_cache_thread_lock); \
+} while (0)
+
+#define CC_LOCK(x) do { \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Locking com_cache directory\n",__LINE__,gettid()); \
+	} \
+	btlock_lock((x).debug_lock); \
+} while (0)
+
+#define CC_UNLOCK(x) do { \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Unlocking com_cache directory\n",__LINE__,gettid()); \
+	} \
+	btlock_unlock((x).debug_lock); \
+} while (0)
+
+#define CCE_LOCK(y) do { \
+	struct com_cache_entry * x=(y); \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Locking com_cache[%u]\n",__LINE__,gettid(),(unsigned)x->index); \
+	} \
+	btlock_lock(x->debug_lock); \
+} while (0)
+
+#define CCE_UNLOCK(y) do { \
+	struct com_cache_entry * x=(y); \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Unlocking com_cache[%u]\n",__LINE__,gettid(),(unsigned)x->index); \
+	} \
+	btlock_unlock(x->debug_lock); \
+} while (0)
+
+#define CCE_LOCK_FREE(y) do { \
+	struct com_cache_entry * x=(y); \
+	/* \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Freeing lock for com_cache[%u] which is using pipe fd %4i->%4i\n",__LINE__,gettid(),x->index,x->debug_lock->fd_writer_side,x->debug_lock->fd_reader_side); \
+	} \
+	*/ \
+	btlock_lock_free(x->debug_lock); \
+} while (0)
+
+#define CCE_LOCK_MK(y) do { \
+	struct com_cache_entry * x=(y); \
+	if (CC_DEBUG_LOCKS) { \
+		eprintf("%4i in thread %5i: Allocating lock for com_cache[%u]\n",__LINE__,gettid(),(unsigned)x->index); \
+	} \
+	x->debug_lock=btlock_lock_mk(); \
+	/* \
+	if (CC_DEBUG_LOCKS) { \
+		if (x->debug_lock) { \
+			eprintf("%4i in thread %5i: Allocated lock using pipe fd %4i->%4i\n",__LINE__,gettid(),x->debug_lock->fd_writer_side,x->debug_lock->fd_reader_side); \
+		} else { \
+			eprintf("%4i in thread %5i: Allocation failed\n",__LINE__,gettid()); \
+		} \
+	} \
+	*/ \
+} while (0)
+
+struct com_cache_entry {
+	struct com_cache_entry * next;
+	struct com_cache_entry * prev;
+	int num_in_use;
+	
+	struct btlock_lock * debug_lock;
+	u32 * entry;
+	size_t index;
+	bool dirty;
+};
+
+struct com_cache {
+	struct btlock_lock * debug_lock;
+	u32 size;
+	u32 clusters_per_entry;
+	unsigned num_in_memory;
+	struct com_cache_entry * * ccgroup;
+	struct com_cache_entry * head;
+	struct com_cache_entry * tail;
+	struct com_cache_entry * read_head;
+	struct com_cache_entry * read_tail;
+	// 2^32*4/65536=256KB per cache entry
+#ifdef COMC_IN_MEMORY
+	struct {
+		u8 * ptr;
+		size_t len;
+	} * compr;
+#endif // #ifdef COMC_IN_MEMORY, else
+};
 
 struct scan_context {
 	struct bdev * bdev;
@@ -211,23 +474,28 @@ struct scan_context {
 	struct super_block * sb;
 	struct dir * * dir;
 	
-	u16 * link_count;
+	struct com_cache comc;
+	struct btlock_lock * com_cache_thread_lock;
+	
+	u16 * inode_link_count;
+	char * * inode_type_str;
+	
+	int cluster_offset;
 	
 //	struct read_tables_list * list_head;
 //	struct read_tables_list * list_tail;
 	
 	const char * name;
 	
-	u8 * calculated_cluster_allocation_map;
-	u8 * calculated_cluster_collision_map;
 	u8 * calculated_inode_allocation_map;
 	u8 * cluster_allocation_map;
+	u8 * calculated_cluster_allocation_map;
 	u8 * inode_allocation_map;
 	
 	u16 * calculated_link_count_array;
 	
 	block_t cluster_size_Blocks;
-	block_t cs;
+//	block_t cs;
 	block_t group_size_Blocks;
 	block_t size_of_gdt_Blocks;
 	
@@ -242,6 +510,7 @@ struct scan_context {
 	
 	size_t cluster_size_Bytes;
 	size_t num_clusterpointers;
+	unsigned num_clusterpointers_shift;
 	
 	u32 clusters_per_group;
 	
@@ -255,7 +524,7 @@ struct scan_context {
 	 * Please note that group is being updated without any locking at all.
 	 */
 	volatile unsigned table_reader_group;
-	volatile unsigned prereaded;
+	atomic_t prereaded;
 	
 	/*
 	 * Tells, wether the reader is running in the background or not. It 
@@ -294,7 +563,7 @@ bool read_super(struct scan_context * sc,struct super_block * sb,unsigned group,
 		
 		if (sb->magic==MAGIC) {
 			if (sb->my_group!=group) {
-				ERRORF("%s: Cluster group %u contains a super block backup claiming belonging to cluster group %u.",sc->name,(unsigned)group,sb->my_group);
+				ERRORF("%s: Cluster group %u contains a super block backup claiming to belonging to cluster group %u.",sc->name,(unsigned)group,sb->my_group);
 				return false;
 			}
 			if (probing) {
@@ -362,7 +631,7 @@ void process_table_for_group(unsigned group,struct scan_context * sc) {
 	struct inode * inode2=(struct inode *)(sc->list_head->block_buffer+2*sc->cluster_size_Bytes);
 */
 	
-	struct inode * inode=sc->inode_table+sc->sb->inodes_per_group*group;
+	struct inode * inode=sc->inode_table+sc->sb->inodes_per_group*(group%INODE_TABLE_ROUNDROUBIN);
 	
 /*
 	memcpy(
@@ -378,7 +647,6 @@ void process_table_for_group(unsigned group,struct scan_context * sc) {
 		endian_swap_inode(inode+i);
 	}
 	
-	assert(sc->prereaded--);
 //	eprintf("process_table_for_group(%u): free(list_head->bb=%p)\n",group,cmd_struct->list_head->block_buffer);
 }
 
@@ -388,14 +656,12 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	unsigned counter;
 	
 	counter=0;
-	while (sc->prereaded==MAX_PREREADED) {
+	while (atomic_get(&sc->prereaded)==MAX_INODE_TABLE_PREREADED) {
 		if (++counter==PREREADED_NOTIFYTIME) {
 //			NOTIFY("read_table_for_one_group: Going to sleep to let the foreground process catch up ...");
 		}
 		sleep(1);
 	}
-	
-	++sc->prereaded;
 	
 /*	counter=0;
 	while (!(list->next=malloc(sizeof(*list->next)))) {
@@ -433,7 +699,17 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	
 	u8 *    cb_b=sc->cluster_allocation_map+sc->cluster_size_Bytes*sc->table_reader_group;
 	u8 *    ib_b=sc->inode_allocation_map+sc->sb->inodes_per_group/8*sc->table_reader_group;
-	u8 *    it_b=(u8*)(sc->inode_table+sc->sb->inodes_per_group*sc->table_reader_group);
+	u8 *    it_b=(u8*)(sc->inode_table+sc->sb->inodes_per_group*(sc->table_reader_group%INODE_TABLE_ROUNDROUBIN));
+	
+	/*
+	eprintf(
+		"read_table_for_one_group: sc->table_reader_group=%u (0x%0x), sc->inode_table=%p => it_b=%p\n"
+		,sc->table_reader_group
+		,sc->table_reader_group
+		,sc->inode_table
+		,it_b
+	);
+	*/
 	
 	size_t  cb_n=sc->cluster_size_Bytes;
 	size_t  ib_n=sc->sb->inodes_per_group/8;
@@ -481,7 +757,7 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	 * Finally read the actual inode table.
 	 *
 	 * FIXME: There should be better error handling:
-	 *  - try to reach each block if bulk reading fails.
+	 *  - try to read each block in turn, if bulk reading fails.
 	 *  - each block which can't be read should be zeroed out.
 	 */
 	if (it_s!=bdev_read(sc->bdev,it_a,it_s,it_b)) {
@@ -516,7 +792,7 @@ bool read_table_for_one_group(struct scan_context * sc) {
 				have_soft_errors=true;
 				memset(it_b,0,bs);
 			} else {
-				// struct inode * it=(struct inode *)error_bitmap;
+//				struct inode * it=(struct inode *)error_bitmap;
 				int ni=bs/sizeof(struct inode);
 				if (first) {
 					first=false;
@@ -601,60 +877,482 @@ bool read_table_for_one_group(struct scan_context * sc) {
 		}
 	}
 	
-	if (!sc->background) {
+	atomic_inc(&sc->prereaded);
+	
+//	if (!sc->background) {
 		process_table_for_group(sc->table_reader_group,sc);
-	}
+//	}
 	
 	return true;
 }
 
-int read_tables(void * arg) {
+bool exit_request_com_cache_thread=false;
+// btlock_t wait_for_com_cache_thread;
+
+THREAD_RETURN_TYPE com_cache_thread(void * arg) {
+	struct scan_context * sc=(struct scan_context *)arg;
+	
+	eprintf("Executing com_cache_thread via thread %i\n",gettid());
+	
+	size_t cbuflen=compressBound(4*sc->comc.clusters_per_entry);
+	Bytef * cbuffer=malloc(cbuflen);
+	
+	while (!exit_request_com_cache_thread) {
+		bool nothing_done=true;
+		CC_LOCK(sc->comc);
+		if (sc->comc.read_head) {
+			nothing_done=false;
+			struct com_cache_entry * walk=sc->comc.read_head;
+			sc->comc.read_head=sc->comc.read_head->next;
+			if (!sc->comc.read_head) {
+				sc->comc.read_tail=NULL;
+			}
+			++sc->comc.num_in_memory;
+			CC_UNLOCK(sc->comc);
+			
+			// CCE_LOCK(walk); <--- was already locked by get_com_cache_entry
+			
+			// BEGIN READING
+			walk->entry=malloc(4*sc->comc.clusters_per_entry);
+#ifdef COMC_IN_MEMORY
+			if (!sc->comc.compr[walk->index].ptr) {
+#else // #ifdef COMC_IN_MEMORY
+			char * tmp;
+			int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_RDONLY);
+			if (fd<0) {
+				if (errno!=ENOENT) {
+					eprintf("open(»%s«): %s\n",tmp,strerror(errno));
+					exit(2);
+				}
+				free(tmp);
+#endif // #ifdef COMC_IN_MEMORY, else
+				memset(walk->entry,0,4*sc->comc.clusters_per_entry);
+//				eprintf("Init %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
+			} else {
+//				eprintf("Read %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
+#ifdef COMC_IN_MEMORY
+				Bytef * cbuffer=(Bytef *)sc->comc.compr[walk->index].ptr;
+				uLongf  dbuflen=sc->comc.compr[walk->index].len;
+#else // #ifdef COMC_IN_MEMORY
+				if (CC_DEBUG_LOCKS) eprintf("%4i in thread %5i: Reading data by using fd %i\n",__LINE__,gettid(),fd);
+				uLongf dbuflen=read(fd,cbuffer,cbuflen);
+				if (close(fd)) {
+					eprintf("close(»%s«): %s\n",tmp,strerror(errno));
+					exit(2);
+				}
+				free(tmp);
+#endif // #ifdef COMC_IN_MEMORY, else
+				uLongf x=4*sc->comc.clusters_per_entry;
+				if (Z_OK!=uncompress((Bytef*)walk->entry,&x,(Bytef*)cbuffer,dbuflen)) {
+					eprintf("uncompress failed\n");
+					exit(2);
+				}
+				if (x!=4*sc->comc.clusters_per_entry) {
+					eprintf("uncompress failed\n");
+					exit(2);
+				}
+			}
+			
+			walk->dirty=false;
+			// END READING
+			
+			CC_LOCK(sc->comc);
+			if (unlikely(!sc->comc.head)) {
+				sc->comc.head=sc->comc.tail=walk;
+				walk->next=walk->prev=NULL;
+			} else {
+				walk->prev=NULL;
+				walk->next=sc->comc.head;
+				sc->comc.head->prev=walk;
+				sc->comc.head=walk;
+			}
+
+			CCE_UNLOCK(walk);
+		}
+		if (nothing_done || likely(sc->comc.num_in_memory>=MAX_COMC_IN_MEMORY)) {
+			if (likely(sc->comc.num_in_memory>MAX_COMC_DIRTY)) {
+				size_t num=sc->comc.num_in_memory-MAX_COMC_DIRTY;
+				struct com_cache_entry * walk=sc->comc.tail;
+				do {
+					if (!walk->num_in_use
+					&&  walk->dirty) {
+						++walk->num_in_use;
+						CC_UNLOCK(sc->comc);
+						
+						CCE_LOCK(walk);
+						
+//						eprintf("Sync %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
+						
+						// BEGIN WRITING
+						uLongf dbuflen=cbuflen;
+						if (Z_OK!=compress2((Bytef*)cbuffer,&dbuflen,(Bytef*)walk->entry,4*sc->comc.clusters_per_entry,1)) {
+							eprintf("compress2 failed\n");
+							exit(2);
+						}
+#ifdef COMC_IN_MEMORY
+						free(sc->comc.compr[walk->index].ptr);
+						memcpy(sc->comc.compr[walk->index].ptr=malloc(dbuflen),cbuffer,sc->comc.compr[walk->index].len=dbuflen);
+#else // #ifdef COMC_IN_MEMORY
+						char * tmp;
+						int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_CREAT|O_TRUNC|O_WRONLY,0666);
+						if (fd<0) {
+							eprintf("open(»%s«): %s\n",tmp,strerror(errno));
+							exit(2);
+						} else {
+							if (CC_DEBUG_LOCKS) eprintf("%4i in thread %5i: Writing data by using fd %i\n",__LINE__,gettid(),fd);
+						}
+						if ((ssize_t)dbuflen!=write(fd,cbuffer,dbuflen)) {
+							eprintf("write(»%s«): %s\n",tmp,strerror(errno));
+							exit(2);
+						}
+						if (close(fd)) {
+							eprintf("close(»%s«): %s\n",tmp,strerror(errno));
+							exit(2);
+						}
+						free(tmp);
+#endif // #ifdef COMC_IN_MEMORY, else
+						walk->dirty=false;
+						// END WRITING
+						
+						CCE_UNLOCK(walk);
+						
+						CC_LOCK(sc->comc);
+						--walk->num_in_use;
+						nothing_done=false;
+						break;
+					}
+					walk=walk->prev;
+					assert(walk);
+				} while (--num);
+			}
+		}
+		if (likely(sc->comc.num_in_memory>=MAX_COMC_IN_MEMORY)) {
+			struct com_cache_entry * walk=sc->comc.tail;
+			while (walk && (walk->num_in_use || walk->dirty)) {
+				walk=walk->prev;
+			}
+			if (walk) {
+				--sc->comc.num_in_memory;
+//				eprintf("Drop %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
+				if (walk->next) {
+					walk->next->prev=walk->prev;
+				} else {
+					sc->comc.tail=walk->prev;
+				}
+				if (walk->prev) {
+					walk->prev->next=walk->next;
+				} else {
+					sc->comc.head=walk->next;
+				}
+				free(walk->entry);
+				sc->comc.ccgroup[walk->index]=NULL;
+				CCE_LOCK_FREE(walk);
+				free(walk);
+			}
+		}
+		CC_UNLOCK(sc->comc);
+		if (nothing_done) {
+			CCT_WAIT();
+		}
+	}
+	free(cbuffer);
+	exit_request_com_cache_thread=false;
+	CCT_WAKE();
+	return 0;
+}
+
+struct com_cache_entry * get_com_cache_entry(struct scan_context * sc,size_t ccg,u32 cluster) {
+/*
+	CC_LOCK(sc->comc);
+	if (!sc->comc.ccgroup[ccg]) {
+		sc->comc.ccgroup[ccg]=malloc(sizeof(*sc->comc.ccgroup[ccg]));
+		sc->comc.ccgroup[ccg]->index=ccg;
+		do {
+			CCE_LOCK_MK(sc->comc.ccgroup[ccg]);
+		} while (!sc->comc.ccgroup[ccg]->debug_lock);
+		sc->comc.ccgroup[ccg]->entry=NULL;
+		sc->comc.ccgroup[ccg]->num_in_use=1;
+		sc->comc.ccgroup[ccg]->
+		sc->comc.compr[ccg].ptr
+	}
+	CCE_LOCK(sc->comc.ccgroup[ccg]);
+	CC_UNLOCK(sc->comc);
+	if (!sc->comc.ccgroup[ccg]->entry) {
+		sc->comc.ccgroup[ccg]->next=NULL;
+		sc->comc.ccgroup[ccg]->prev=sc->comc.read_tail;
+		if (!sc->comc.read_tail) {
+			sc->comc.read_head=sc->comc.ccgroup[ccg];
+		} else {
+			sc->comc.read_tail->next=sc->comc.ccgroup[ccg];
+		}
+		sc->comc.read_tail=sc->comc.ccgroup[ccg];
+		// A little bit strange. We lock this here and don't unlock it again. That 
+		// will be done by the reader thread. This allows us to wait for it by a 
+		// simple double locking.
+		CCT_WAKE(); // Make sure, we won't wait senselessly for the com_cache_thread.
+		CCE_LOCK(sc->comc.ccgroup[ccg]);
+	}
+	++sc->comc.ccgroup[ccg]->num_in_use;
+	*/
+	CC_LOCK(sc->comc);
+	if (ccg>=sc->comc.size) {
+		eprintf(
+			"ccg=%u, sc->comc.size=%u (cluster=%u)\n"
+			,(unsigned)ccg
+			,(unsigned)sc->comc.size
+			,(unsigned)cluster
+		);
+		ccg=*((size_t*)0);
+	}
+	assert(ccg<sc->comc.size);
+	if (!sc->comc.ccgroup[ccg]) {
+		sc->comc.ccgroup[ccg]=malloc(sizeof(*sc->comc.ccgroup[ccg]));
+		sc->comc.ccgroup[ccg]->index=ccg;
+		do {
+			CCE_LOCK_MK(sc->comc.ccgroup[ccg]);
+		} while (!sc->comc.ccgroup[ccg]->debug_lock);
+		sc->comc.ccgroup[ccg]->num_in_use=1;
+		sc->comc.ccgroup[ccg]->next=NULL;
+		sc->comc.ccgroup[ccg]->prev=sc->comc.read_tail;
+		if (!sc->comc.read_tail) {
+			sc->comc.read_head=sc->comc.ccgroup[ccg];
+		} else {
+			sc->comc.read_tail->next=sc->comc.ccgroup[ccg];
+		}
+		sc->comc.read_tail=sc->comc.ccgroup[ccg];
+		// A little bit strange. We lock this here and don't unlock it again. That 
+		// will be done by the reader thread. This allows us to wait for it by a 
+		// simple double locking.
+		CCT_WAKE(); // Make sure, we won't wait senselessly for the com_cache_thread.
+		CCE_LOCK(sc->comc.ccgroup[ccg]);
+	} else {
+		++sc->comc.ccgroup[ccg]->num_in_use;
+	}
+	CC_UNLOCK(sc->comc);
+	CCE_LOCK(sc->comc.ccgroup[ccg]);
+	CC_LOCK(sc->comc);
+	struct com_cache_entry * walk=sc->comc.ccgroup[ccg];
+	if (walk->prev) {
+		walk->prev->next=walk->next;
+		
+		if (walk->next) {
+			walk->next->prev=walk->prev;
+		} else {
+			sc->comc.tail=walk->prev;
+		}
+		walk->prev=NULL;
+		walk->next=sc->comc.head;
+		if (sc->comc.head) {
+			sc->comc.head->prev=walk;
+		} else {
+			sc->comc.tail=walk;
+		}
+		sc->comc.head=walk;
+	}
+	CC_UNLOCK(sc->comc);
+	return (struct com_cache_entry *)sc->comc.ccgroup[ccg];
+}
+
+void release(struct scan_context * sc,struct com_cache_entry * ccge) {
+	CCE_UNLOCK(ccge);
+	CC_LOCK(sc->comc);
+	--ccge->num_in_use;
+	CC_UNLOCK(sc->comc);
+}
+
+/*
+ * This is proven to be correct for inode allocation map, 
+ * but MAY be incorrect for block allocation map.
+ */
+#define bit2byte(o) (o>>3)
+#define bit2mask(o) (1<<(o&7))
+
+static inline void set_bit(u8 * bitmap,u32 o) {
+	bitmap[bit2byte(o)]|=bit2mask(o);
+}
+
+static inline bool get_bit(u8 * bitmap,u32 o) {
+	return bitmap[bit2byte(o)]&bit2mask(o);
+}
+
+#define get_calculated_inode_allocation_map_bit(sc,inode_num) get_bit(sc->calculated_inode_allocation_map,inode_num-1)
+#define set_calculated_inode_allocation_map_bit(sc,inode_num) set_bit(sc->calculated_inode_allocation_map,inode_num-1)
+
+#define get_calculated_cluster_allocation_map_bit(sc,cluster_num) get_bit(sc->calculated_cluster_allocation_map,cluster_num-sc->cluster_offset)
+#define set_calculated_cluster_allocation_map_bit(sc,cluster_num) set_bit(sc->calculated_cluster_allocation_map,cluster_num-sc->cluster_offset)
+
+#define get_cluster_allocation_map_bit(sc,cluster_num) get_bit(sc->calculated_cluster_allocation_map,cluster_num-sc->cluster_offset)
+
+//		NOTIFYF("%s: Cluster %llu used multiple times.",name,(unsigned long long)cluster);
+
+#define break_on_cluster(cluster) (false \
+/*	||  cluster==      627 \
+	||  cluster==    18703 \
+	||  cluster==    18704 \
+	||  cluster==  6488092 \
+	||  cluster==  6488093 \
+	||  cluster==  8331277 \
+	||  cluster==  8331278 \
+	||  cluster== 11157515 \
+	||  cluster== 11157516 \
+	||  cluster== 11157519 \
+	||  cluster== 11157520 \
+	||  cluster== 11976715 \
+	||  cluster== 11976716 \
+	||  cluster== 12025867 \
+	||  cluster== 12025868 \
+	||  cluster== 12042251 \
+	||  cluster== 12042252 \
+	||  cluster== 12058635 */ \
+)
+
+#define cluster_to_cci(cluster) (((cluster)-sc->cluster_offset)%sc->comc.clusters_per_entry)
+#define cluster_to_ccg(cluster) (((cluster)-sc->cluster_offset)/sc->comc.clusters_per_entry)
+
+u32 set_owner(struct scan_context * sc,u32 cluster,u32 inode) {
+	// size_t index=cluster%sc->comc.clusters_per_entry;
+	// struct com_cache_entry * ccge=get_com_cache_entry(sc,cluster/sc->comc.clusters_per_entry);
+	
+	size_t index=cluster_to_cci(cluster);
+	struct com_cache_entry * ccge=get_com_cache_entry(sc,cluster_to_ccg(cluster),cluster);
+	
+	u32 retval=ccge->entry[index];
+	if (break_on_cluster(cluster)) { \
+		NOTIFYF("%s: set_owner(cluster=%lu,inode=%li)=%li",sc->name,(unsigned long)cluster,(long)inode,(long)retval);
+	}
+	ccge->entry[index]=inode;
+	ccge->dirty=true;
+	release(sc,ccge);
+	return retval;
+}
+
+u32 get_owner(struct scan_context * sc,u32 cluster) {
+	size_t index=cluster_to_cci(cluster);
+	struct com_cache_entry * ccge=get_com_cache_entry(sc,cluster_to_ccg(cluster),cluster);
+	
+	u32 retval=ccge->entry[index];
+	release(sc,ccge);
+	if (break_on_cluster(cluster)) {
+		NOTIFYF("%s: get_owner(cluster=%lu)=%li",sc->name,(unsigned long)cluster,(long)retval);
+	}
+	return retval;
+}
+
+/*
+	CL_LOCK(sc); \
+	get_calculated_cluster_allocation_map_bit(sc,__cluster)) { \
+		set_calculated_cluster_allocation_map_bit(sc,__cluster); \
+	CL_UNLOCK(sc); \
+	
+	eprintf( \
+		"%4i in thread %5i: cluster[%llu]=%lu\n" \
+		,__LINE__ \
+		,gettid() \
+		,(unsigned long long)__cluster \
+		,(unsigned long)__inode \
+	); \
+*/
+
+#define MARK_CLUSTER_IN_USE_BY(sc,_cluster,_inode) do { \
+	u64 __cluster=(_cluster); \
+	u32 __inode=(_inode); \
+	u32 old_owner=set_owner(sc,__cluster,__inode); \
+	if (old_owner) { \
+		NOTIFYF( \
+			"%s: Cluster %llu used multiple times, by %lu and %lu." \
+			,sc->name \
+			,(unsigned long long)__cluster \
+			,(unsigned long)old_owner \
+			,(unsigned long)__inode \
+		); \
+	} \
+} while (0)
+
+u32 set_owners(struct scan_context * sc,block_t * cp,size_t * num,u32 inode) {
+	size_t index=cluster_to_cci(*cp);
+	struct com_cache_entry * ccge=get_com_cache_entry(sc,cluster_to_ccg(*cp),*cp);
+	
+	u32 retval=0;
+	while (likely(!retval)
+	&&     likely(index<sc->comc.clusters_per_entry)
+	&&     likely(*num)) {
+		retval=ccge->entry[index];
+		if (break_on_cluster(*cp)) {
+			NOTIFYF("%s: set_owner(cluster=%lu,inode=%li)=%li",sc->name,(unsigned long)*cp,(long)inode,(long)retval);
+		}
+		ccge->entry[index]=inode;
+		++index;
+		++*cp;
+		--*num;
+	}
+	ccge->dirty=true;
+	release(sc,ccge);
+	return retval;
+}
+
+/*
+		eprintf("Calling set_owners(sc,&%llu,&%lu,inode=%li\n",(unsigned long long)c,(unsigned long)num,(long)inode); \
+		eprintf("Returned from set_owners, num=%li now\n",(long)num); \
+*/
+
+#define MARK_CLUSTERS_IN_USE_BY(sc,_c,_num,_inode) do { \
+	block_t c=(_c); \
+	size_t num=(_num); \
+	u32 inode=(_inode); \
+	while (num) { \
+		u32 old_owner=set_owners(sc,&c,&num,inode); \
+		if (old_owner) { \
+			NOTIFYF( \
+				"%s: Cluster %llu used multiple times, by %lu and %lu." \
+				,sc->name \
+				,(unsigned long long)c-1 \
+				,(unsigned long)old_owner \
+				,(unsigned long)inode \
+			); \
+		} \
+	} \
+} while (0)
+
+THREAD_RETURN_TYPE ext2_read_tables(void * arg) {
 	struct scan_context * sc=(struct scan_context *)arg;
 	
 	eprintf("Executing read_tables via thread %i\n",gettid());
+	
+	unsigned num_clusters_per_group_for_inode_table=sc->sb->inodes_per_group/(sc->cluster_size_Bytes/sizeof(struct inode));
 	
 	OPEN_PROGRESS_BAR_LOOP(0,sc->table_reader_group,sc->num_groups)
 	
 		read_table_for_one_group(sc);
 		
+		unsigned long c;
+		
+		c=sc->gdt[sc->table_reader_group].cluster_allocation_map;
+		if (PRINT_MARK_CAM) eprintf("Marking cluster %lu in use (cluster allocation bitmap in group %u)\n",c,sc->table_reader_group);
+		MARK_CLUSTER_IN_USE_BY(sc,c,-1UL-(5UL*sc->table_reader_group));
+		
+		c=sc->gdt[sc->table_reader_group].inode_allocation_map;
+		if (PRINT_MARK_IAM) eprintf("Marking cluster %lu in use (inode allocation bitmap in group %u)\n",c,sc->table_reader_group);
+		MARK_CLUSTER_IN_USE_BY(sc,c,-2UL-(5UL*sc->table_reader_group));
+		
+		if (PRINT_MARK_IT) eprintf(
+			"Marking clusters %lu .. %lu in use (inode table in group %u)\n"
+			,(unsigned long)sc->gdt[sc->table_reader_group].inode_table
+			,(unsigned long)(sc->gdt[sc->table_reader_group].inode_table+num_clusters_per_group_for_inode_table)
+			,sc->table_reader_group
+		);
+		MARK_CLUSTERS_IN_USE_BY(sc,sc->gdt[sc->table_reader_group].inode_table,num_clusters_per_group_for_inode_table,-3UL-(5UL*sc->table_reader_group));
+		
 		++sc->table_reader_group;
 		
 		PRINT_PROGRESS_BAR(sc->table_reader_group);
 	CLOSE_PROGRESS_BAR_LOOP()
-
+	
 	if (sc->background) {
 		NOTIFYF("%s: Background reader is successfully quitting",sc->name);
 		--live_child;
 	}
-	return 0;
+	THREAD_RETURN();
 }
-
-int ext2_read_tables(void * arg) {
-	return read_tables(arg);
-}
-
-#define xset_bit(bitmap,bitoff) do { \
-	u8 * b=(bitmap); \
-	u32 o=(bitoff); \
-	b[o>>3]|=1<<(o&7); \
-} while (0)
-
-static inline bool xget_bit(u8 * bitmap,u32 bitoff) {
-	return !!(bitmap[bitoff>>3]&(1<<(bitoff&7)));
-}
-
-//		NOTIFYF("%s: Cluster %llu used multiple times.",name,(unsigned long long)cluster);
-
-#define MARK_CLUSTER_IN_USE(sc,cluster) do { \
-	u32 c=(cluster); \
-	btlock_lock(sc->cam_lock); \
-	if (xget_bit(sc->calculated_cluster_allocation_map,c)) { \
-		xset_bit(sc->calculated_cluster_collision_map,c); \
-	} else { \
-		xset_bit(sc->calculated_cluster_allocation_map,c); \
-	} \
-	btlock_unlock(sc->cam_lock); \
-} while (0)
 
 void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) {
 	u8 buffer[isc->sc->cluster_size_Bytes];
@@ -698,6 +1396,7 @@ void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) 
 			+((u32)buffer[offset+5]<< 8)
 		;
 		if (!inode) {
+//			NOTIFYF("%s: Inode %lu [%s]: Cluster %lu: Free directory record of length %u bytes.",isc->sc->name,isc->inode_num,isc->type,cluster,reclen);
 			offset+=reclen;
 			continue;
 		}
@@ -715,9 +1414,11 @@ void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) 
 		}
 		filename[filename_len]=0;
 		offset+=reclen;
+//		NOTIFYF("%s: Inode %lu [%s]: Cluster %lu: Directory entry pointing to inode %lu: »%s«.",isc->sc->name,isc->inode_num,isc->type,cluster,inode,filename);
 		
 		if (inode<=isc->sc->sb->num_inodes) {
-			++isc->sc->link_count[inode-1];
+//			++isc->sc->link_count[inode-1];
+			++isc->sc->calculated_link_count_array[inode-1];
 		} else {
 			ERRORF("%s: Inode %lu [%s]: Entry \"%s\" points to illegal inode %lu.",isc->sc->name,isc->inode_num,isc->type,filename,(unsigned long)inode);
 		}
@@ -756,34 +1457,65 @@ void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) 
 	}
 }
 
-#define CHK_BLOCK(level,cluster) chk_block(isc,level,cluster)
+static inline void isc_schedule_cluster_init(struct inode_scan_context * isc) {
+	isc->schedule_first_cluster=0;
+	isc->schedule_num_clusters=0;
+}
+
+static inline void isc_schedule_cluster_flush(struct inode_scan_context * isc) {
+	if (isc->schedule_num_clusters) {
+		MARK_CLUSTERS_IN_USE_BY(isc->sc,isc->schedule_first_cluster,isc->schedule_num_clusters,isc->inode_num);
+	}
+}
+
+static inline void isc_schedule_cluster_add(struct inode_scan_context * isc,unsigned long cluster) {
+	if (likely((isc->schedule_first_cluster+isc->schedule_num_clusters)==cluster)) {
+		++isc->schedule_num_clusters;
+		return;
+	}
+	isc_schedule_cluster_flush(isc);
+	isc->schedule_first_cluster=cluster;
+	isc->schedule_num_clusters=1;
+//	MARK_CLUSTER_IN_USE_BY(isc->sc,cluster,isc->inode_num);
+}
+
 void chk_block(struct inode_scan_context * isc,int level,unsigned long cluster) {
 //	eprintf("chk_block(level=%i,cluster=%lu)\n",level,cluster);
+	if (break_on_cluster(cluster)) {
+		NOTIFYF(
+			"%s: Inode %lu [%s]: chk_block on cluster %lu (for inode %lu)."
+			,isc->sc->name,isc->inode_num,isc->type
+			,cluster,(unsigned long)isc->inode_num
+		);
+	}
 	
-	if (likely(!cluster)) {
-		unsigned long h=1;
-		
-		while (level--) h*=isc->sc->num_clusterpointers;
+	if (unlikely(!cluster)) {
+		unsigned long h=1<<(level*isc->sc->num_clusterpointers_shift);
 		
 		isc->maybe_holes+=h;
 		
 		return;
 	}
 	
-	MARK_CLUSTER_IN_USE(isc->sc,cluster);
-	
 	isc->holes+=isc->maybe_holes;
 	isc->maybe_holes=0;
 	
 	if (unlikely(cluster>=isc->sc->sb->num_clusters)) {
+		ERRORF(
+			"%s: Inode %lu [%s]: Illegal cluster %llu"
+			,isc->sc->name,isc->inode_num,isc->type
+			,(unsigned long long)cluster
+		);
 		++isc->illegal_ind_clusters[level];
 		return;
 	}
 	
+	isc_schedule_cluster_add(isc,cluster);
+	
 	if (isc->is_dir && !level) {
 		process_dir_cluster(isc,cluster);
 	}
-
+	
 	++isc->used_clusters;
 	
 	if (likely(!level)) return;
@@ -803,32 +1535,62 @@ void chk_block(struct inode_scan_context * isc,int level,unsigned long cluster) 
 struct thread {
 	struct thread * volatile next;
 	struct thread * volatile prev;
-	void * stack_memory;
 	struct btlock_lock * lock;
+#ifdef BTCLONE
+	void * stack_memory;
 	pid_t tid;
+#else // #ifdef BTCLONE
+	pthread_t thread;
+#endif // #ifdef BTCLONE, else
+	void * arg;
 };
 
 struct thread * thread_head=NULL;
 struct thread * thread_tail=NULL;
 
-bool do_chk_block_function(struct inode_scan_context * isc) {
-	for (unsigned z=0;z<NUM_ZIND;++z) {
-		CHK_BLOCK(0,isc->inode->cluster[z]);
+// bool do_chk_block_function(struct inode_scan_context * isc) {
+THREAD_RETURN_TYPE chk_block_function(void * arg) {
+	struct thread * t=(struct thread *)arg;
+	
+	if (t->lock) {
+		btlock_lock(t->lock);
+		btlock_unlock(t->lock);
 	}
 	
-	CHK_BLOCK(1,isc->inode->cluster[FIRST_SIND]);
+	struct inode_scan_context * isc=(struct inode_scan_context *)t->arg;
+	
+	/*
+	if (t->lock) {
+		NOTIFYF(
+			"%s: Inode %lu [%s]: Background job started."
+			,isc->sc->name
+			,isc->inode_num
+			,isc->type
+		);
+	}
+	*/
+	
+	isc_schedule_cluster_init(isc);
+	
+	for (unsigned z=0;z<NUM_ZIND;++z) {
+		chk_block(isc,0,isc->inode->cluster[z]);
+	}
+	
+	chk_block(isc,1,isc->inode->cluster[FIRST_SIND]);
 /*
 	if (inode->cluster[FIRST_DIND] || inode->cluster[FIRST_TIND]) {
 		PRINT_PROGRESS_BAR(inode_num);
 	}
 */
-	CHK_BLOCK(2,isc->inode->cluster[FIRST_DIND]);
+	chk_block(isc,2,isc->inode->cluster[FIRST_DIND]);
 /*
 	if (inode->cluster[FIRST_DIND] || inode->cluster[FIRST_TIND]) {
 		PRINT_PROGRESS_BAR(inode_num);
 	}
 */
-	CHK_BLOCK(3,isc->inode->cluster[FIRST_TIND]);
+	chk_block(isc,3,isc->inode->cluster[FIRST_TIND]);
+	
+	isc_schedule_cluster_flush(isc);
 	
 	unsigned long illegal_blocks=0;
 	for (int i=0;i<4;++i) illegal_blocks+=isc->illegal_ind_clusters[i];
@@ -837,7 +1599,8 @@ bool do_chk_block_function(struct inode_scan_context * isc) {
 		unsigned ino=isc->inode_num-1;
 		
 		// Every directory points back to itself, so increment link count
-		++isc->sc->calculated_link_count_array[ino];
+//		++isc->sc->calculated_link_count_array[ino];
+		// -> will be done upon reading the '.' entry, which is already done in process_dir_cluster
 		
 		if (unlikely(!isc->sc->dir[ino])) {
 			/*
@@ -894,7 +1657,7 @@ bool do_chk_block_function(struct inode_scan_context * isc) {
 			dl->frst=dn;
 			
 			// Increment link count for the pointed to file
-			++isc->sc->calculated_link_count_array[d->entry[i].inode-1];
+//			++isc->sc->calculated_link_count_array[d->entry[i].inode-1]; <--- already done in process_dir_cluster
 			
 			if (strchr(dst,'/')) {
 				ERRORF(
@@ -939,28 +1702,30 @@ skip_dir:
 //		isc->ok=false;
 	}
 	
+	/*
 	bool retval=isc->sc->waiting4threads;
-	
-	free(isc);
 	
 	return retval;
 }
 
-int chk_block_function(void * arg) {
-	struct inode_scan_context * isc=(struct inode_scan_context *)arg;
+	do_chk_block_function(isc);
+	*/
 	
-	/*
-	 * isc will be freed by do_chk_block_function, so we must save all 
-	 * values, which are needed after the call to it.
-	 */
+	if (isc->sc->waiting4threads) {
+		if (t->lock) {
+			NOTIFYF(
+				"%s: Inode %lu [%s]: Background job completed."
+				,isc->sc->name
+				,isc->inode_num
+				,isc->type
+			);
+		}
+	}
 	
-	const char * name=isc->sc->name;
-	unsigned long inode_num=isc->inode_num;
-	char * type=isc->type;
+	free(isc->inode);
+	free(isc);
 	
-	if (do_chk_block_function(isc)) NOTIFYF("%s: Inode %lu [%s]: Background job completed.",name,inode_num,type);
-	
-	return 0;
+	THREAD_RETURN();
 }
 
 void cluster_scan_inode(struct inode_scan_context * isc) {
@@ -980,152 +1745,179 @@ void cluster_scan_inode(struct inode_scan_context * isc) {
 	isc->maybe_holes=0;
 	isc->holes=0;
 	
+	struct thread * t=malloc(sizeof(*t));
+	if (!t) {
+		eprintf("malloc(t) failed: %s\n",strerror(errno));
+		exit(2);
+	}
+	
+	t->lock=btlock_lock_mk();
+	if (!t->lock) {
+		eprintf("lock_mk failed: %s\n",strerror(errno));
+		exit(2);
+	}
+	
+	// First we lock ourself, so we don't get hurt in the very last moment ...
+	btlock_lock(t->lock);
+	
+	t->arg=isc;
+	
+	bool try_clone;
+	
+	{
+		struct inode * i=malloc(sizeof(*i));
+		*i=*isc->inode;
+		isc->inode=i;
+	}
+	
 	if ((live_child<hard_child_limit && isc->inode->cluster[FIRST_TIND])
 	||  (live_child<soft_child_limit && isc->inode->cluster[FIRST_DIND])) {
-		struct thread * t=malloc(sizeof(*t));
-		if (!t) {
-			// eprintf("malloc(t) failed: %m\n");
-			goto inode_scan_clone_failed;
-		}
-		
-		t->lock=btlock_lock_mk();
-		if (!t->lock) {
-			// eprintf("lock_mk failed: %m\n");
-			free(t);
-			goto inode_scan_clone_failed;
-		}
-		
-		if ((t->tid=btclone(
-			&t->stack_memory,
-			chk_block_function,
-			65536,
-			CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD,
-			(void *)isc
-		))<=0) {
-			// if (errno!=ENOSYS) eprintf("btclone failed: %m\n");
-			btlock_lock_free(t->lock);
-			free(t);
-			
-inode_scan_clone_failed:
-			do_chk_block_function(isc);
-//			NOTIFYF("%s: Inode %lu [%s]: Failed to clone and file is VERY big, skipping processing cluster scan to speed up debugging",name,inode_num,type);
+		try_clone=true;
+		/*
+		struct inode * i=malloc(sizeof(*i));
+		if (unlikely(!i)) {
+			try_clone=false;
 		} else {
-			++live_child;
-			/*
-			 * Now, we link us to the thread list. We assure, that the last element 
-			 * remains the last and the first remains the first. We will be the second 
-			 * last element after this operation.
-			 */
-			
-			// First we lock ourself, so we don't get hurt in the very last moment ...
-			btlock_lock(t->lock);
-			
-#if 0
-			/*
-			 * Now, we lock thread_tail. It's a little bit more complicated than just 
-			 * lock(thread_tail->lock). Think about it, before you change the code ;)
-			 *
-			 * !!! BEWARE OF RACES !!!
-			 */
-			for (;;) {
-				struct thread * tt=thread_tail;
-				lock(tt->lock);
-				if (!tt->next) break;
-				unlock(tt->lock);
-			}
-#else
-			btlock_lock(thread_tail->lock); // thread_tail doesn't change, so this is safe.
-#endif
-			// Now, we got thread_tail, now lock it's precessor.
-			btlock_lock(thread_tail->prev->lock);
-			
-			/*
-			 * Now, we are fine, we can just link us as we do with any doubly linked list.
-			 */
-			t->prev=thread_tail->prev;
-			t->next=thread_tail;
-			t->prev->next=t;
-			t->next->prev=t;
-			
-			/*
-			 * Unlocking is straight forward: Just do it ;)
-			 */
-			btlock_unlock(t->lock);
-			btlock_unlock(t->next->lock);
-			btlock_unlock(t->prev->lock);
-			
-			{
-				struct thread * walk=thread_head->next;
-				while (walk->tid) {
-					if (kill(walk->tid,0)) {
-						walk->next->prev=walk->prev;
-						walk->prev->next=walk->next;
-						free(walk->stack_memory);
-						btlock_lock_free(walk->lock);
-						struct thread * w=walk;
-						walk=walk->prev;
-						free(w);
-						--live_child;
-					}
-					walk=walk->next;
-				}
-			}
+			*i=*isc->inode;
+			isc->inode=i;
+		}
+		*/
+	} else {
+		try_clone=false;
+	}
 	
-			/*
-			pid_t tid;
-			
-			while ((tid=waitpid(-1,NULL,WNOHANG|__WCLONE))>0) {
-				struct thread * walk=thread_head;
-				while (walk && walk->tid!=tid) {
-					walk=walk->next;
-				}
-				if (walk->tid==tid) {
+#ifdef BTCLONE
+	if (!try_clone || (t->tid=btclone(
+		&t->stack_memory,
+		chk_block_function,
+		65536,
+		CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD,
+		(void *)t
+	))<=0) {
+#else // #ifdef BTCLONE
+	if (!try_clone || pthread_create(
+		&t->thread,
+		NULL,
+		chk_block_function,
+		(void *)t
+	)) {
+#endif // #ifdef BTCLONE, else
+		// if (errno!=ENOSYS) eprintf("btclone failed: %m\n");
+		btlock_unlock(t->lock);
+		btlock_lock_free(t->lock);
+		t->lock=NULL;
+		chk_block_function(t);
+		/*
+		if (unlikely(try_clone)) {
+			free(isc->inode);
+			isc->inode=NULL;
+		}
+		*/
+		free(t);
+	} else {
+		++live_child;
+		/*
+		 * Now, we link us to the thread list. We assure, that the last element 
+		 * remains the last and the first remains the first. We will be the second 
+		 * last element after this operation.
+		 */
+		
+		btlock_lock(thread_tail->lock); // thread_tail doesn't change, so this is safe.
+		btlock_lock(thread_tail->prev->lock);
+		
+		/*
+		 * Now, we are fine, we can just link us as we do with any doubly linked list.
+		 */
+		t->prev=thread_tail->prev;
+		t->next=thread_tail;
+		t->prev->next=t;
+		t->next->prev=t;
+		
+		if (isc->sc->waiting4threads) NOTIFYF("%s: Inode %lu [%s]: Processing inode's cluster allocation check in background",isc->sc->name,isc->inode_num,isc->type);
+		
+		/*
+		 * Unlocking is straight forward: Just do it ;)
+		 */
+		btlock_unlock(t->lock);
+		btlock_unlock(t->next->lock);
+		btlock_unlock(t->prev->lock);
+		
+		{
+			struct thread * walk=thread_head->next;
+			while (walk->next) {
+#ifdef BTCLONE
+				if (kill(walk->tid,0)) {
+					free(walk->stack_memory);
+#else // #ifdef BTCLONE
+				if (!pthread_tryjoin_np(walk->thread,NULL)) {
+#endif // #ifdef BTCLONE, else
 					walk->next->prev=walk->prev;
 					walk->prev->next=walk->next;
-					free(walk->stack_memory);
-					lock_free(walk->lock);
-					free(walk);
+					btlock_lock_free(walk->lock);
+					struct thread * w=walk;
+					walk=walk->prev;
+					free(w);
+					--live_child;
 				}
+				walk=walk->next;
 			}
-			*/
-			
-			if (isc->sc->waiting4threads) NOTIFYF("%s: Inode %lu [%s]: Processing inode's cluster allocation check in background",isc->sc->name,isc->inode_num,isc->type);
 		}
-	} else {
-		do_chk_block_function(isc);
 	}
 }
 
-void typecheck_inode(struct inode_scan_context * isc) {
-	if (!isc->inode->links_count) {
-		isc->type_bit=0;
-		if (isc->inode->mode) {
-			isc->type="DELE";
-			if (!isc->inode->dtime) {
-				if (isc->sc->warn_dtime_zero) NOTIFYF("%s: Inode %lu [%s] (deleted) has zero dtime",isc->sc->name,isc->inode_num,isc->type);
-				isc->inode->dtime=isc->sc->sb->wtime;
+void do_typecheck_inode(struct scan_context * sc,u32 inode_num,struct inode * * _inode,char * * _type_str,unsigned * _type_bit) {
+	struct inode * inode;
+	char * type_str;
+	unsigned type_bit;
+	
+	{
+		u32 i=inode_num-1;
+		inode=sc->inode_table+i%sc->sb->inodes_per_group+sc->sb->inodes_per_group*((i/sc->sb->inodes_per_group)%INODE_TABLE_ROUNDROUBIN);
+	}
+	
+	if (!inode->links_count) {
+		type_bit=0;
+		if (inode->mode) {
+			type_str="DELE";
+			if (!inode->dtime) {
+				if (sc->warn_dtime_zero) {
+					NOTIFYF(
+						"%s: Inode %lu [%s] (deleted) has zero dtime <auto-fixed>"
+						,sc->name,(unsigned long)inode_num,type_str
+					);
+				}
+				inode->dtime=sc->sb->wtime;
 			}
 		} else {
-			isc->type="FREE";
+			type_str="FREE";
 		}
 	} else {
-		switch (MASK_FT(isc->inode)) {
-			case MF_BDEV: isc->type="BDEV"; isc->type_bit=FTB_BDEV; break;
-			case MF_CDEV: isc->type="CDEV"; isc->type_bit=FTB_CDEV; break;
-			case MF_DIRE: isc->type="DIRE"; isc->type_bit=FTB_DIRE; break;
-			case MF_FIFO: isc->type="FIFO"; isc->type_bit=FTB_FIFO; break;
-			case MF_SLNK: isc->type="SLNK"; isc->type_bit=FTB_SLNK; break;
-			case MF_FILE: isc->type="FILE"; isc->type_bit=FTB_FILE; break;
-			case MF_SOCK: isc->type="SOCK"; isc->type_bit=FTB_SOCK; break;
-			default: isc->type="ILLT"; isc->type_bit=0; break;
+		switch (MASK_FT(inode)) {
+			case MF_BDEV: type_str="BDEV"; type_bit=FTB_BDEV; break;
+			case MF_CDEV: type_str="CDEV"; type_bit=FTB_CDEV; break;
+			case MF_DIRE: type_str="DIRE"; type_bit=FTB_DIRE; break;
+			case MF_FIFO: type_str="FIFO"; type_bit=FTB_FIFO; break;
+			case MF_SLNK: type_str="SLNK"; type_bit=FTB_SLNK; break;
+			case MF_FILE: type_str="FILE"; type_bit=FTB_FILE; break;
+			case MF_SOCK: type_str="SOCK"; type_bit=FTB_SOCK; break;
+			default     : type_str="ILLT"; type_bit=       0; break;
 		}
 	}
+	
+	if (_inode) *_inode=inode;
+	if (_type_str) *_type_str=type_str;
+	if (_type_bit) *_type_bit=type_bit;
+}
+
+void typecheck_inode(struct inode_scan_context * isc) {
+	do_typecheck_inode(isc->sc,isc->inode_num,&isc->inode,&isc->type,&isc->type_bit);
 }
 
 void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetching) {
 	struct inode_scan_context * isc=malloc(sizeof(*isc));
 	assert(isc);
-	isc->inode=(isc->sc=sc)->inode_table+((isc->inode_num=inode_num)-1);
+	isc->sc=sc;
+	isc->inode_num=inode_num;
 	
 	if (prefetching) {
 		isc->sc->table_reader_group=(isc->inode_num-1)/isc->sc->sb->inodes_per_group;
@@ -1135,21 +1927,51 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 	
 	typecheck_inode(isc);
 	
+	sc->inode_link_count[inode_num-1]=isc->inode->links_count;
+	sc->inode_type_str[inode_num-1]=isc->type;
+	
 	isc->is_dir=isc->type_bit&FTB_DIRE;
 	
 	bool ok=true;
+	
+	assert(!get_calculated_inode_allocation_map_bit(isc->sc,isc->inode_num));
 	
 	if (!isc->inode->links_count) {
 		free(isc);
 		return;
 	}
 	
-	if (xget_bit(isc->sc->calculated_inode_allocation_map,isc->inode_num-1)) {
+	/*
+	if (get_calculated_inode_allocation_map_bit(isc->sc,isc->inode_num)) {
 		free(isc);
 		return;
 	}
+	*/
 	
-	xset_bit(isc->sc->calculated_inode_allocation_map,isc->inode_num-1);
+	u8 a[4];
+	for (size_t i=0;i<4;++i) {
+		a[i]=isc->sc->calculated_inode_allocation_map[(((isc->inode_num-1)>>5)<<2)+i];
+	}
+	
+	set_calculated_inode_allocation_map_bit(isc->sc,isc->inode_num);
+	
+	u8 b[4];
+	for (size_t i=0;i<4;++i) {
+		b[i]=isc->sc->calculated_inode_allocation_map[(((isc->inode_num-1)>>5)<<2)+i];
+	}
+	
+	/*
+	NOTIFYF("%s: Inode %lu [%s]: Marked inode %lu (with bit offset %lu) as in use, bitmap pattern at offset 0x%lx was %02x %02x %02x %02x, is now %02x %02x %02x %02x"
+		,isc->sc->name,isc->inode_num,isc->type
+		,(unsigned long)isc->inode_num
+		,(unsigned long)(isc->inode_num-1)
+		,(unsigned long)(((isc->inode_num-1)>>5)<<2)
+		,(unsigned)a[0],(unsigned)a[1],(unsigned)a[2],(unsigned)a[3]
+		,(unsigned)b[0],(unsigned)b[1],(unsigned)b[2],(unsigned)b[3]
+	);
+	*/
+	
+	assert(get_calculated_inode_allocation_map_bit(isc->sc,isc->inode_num));
 	
 	if (!isc->type_bit) {
 		ERRORF("%s: Inode %lu [%s] has illegal type number %u set",isc->sc->name,isc->inode_num,isc->type,(unsigned)MASK_FT(isc->inode));
@@ -1278,7 +2100,7 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 	
 	if (isc->inode->flags&INOF_JOURNAL_DATA
 	&&  !(isc->sc->sb->rw_compat&RW_COMPAT_HAS_JOURNAL)) {
-		ERRORF("%s: Inode %lu [%s] has flag JOURNAL_DATA set.",isc->sc->name,isc->inode_num,isc->type);
+		ERRORF("%s: Inode %lu [%s] has flag IMAGIC set.",isc->sc->name,isc->inode_num,isc->type);
 		/*
 		 * 1.) Allow feature
 		 *
@@ -1360,14 +2182,23 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 	}
 	
 	if (isc->type_bit&~(FTB_DIRE|FTB_FILE|FTB_SLNK)
-	||  ((isc->type_bit&FTB_SLNK) && (isc->inode->size<64))) {
+	||  ((isc->type_bit&FTB_SLNK) && (isc->inode->size<MAX_SIZE_FAST_SYMBOLIC_LINK))) {
+		/*
 		if (isc->type_bit&~FTB_SLNK) {
 			for (int c=1;c<NUM_CLUSTER_POINTERS;++c) {
 				if (isc->inode->cluster[c]) {
-					NOTIFYF("%s: Inode %lu [%s] has cluster[%i] set.",isc->sc->name,isc->inode_num,isc->type,c);
+					NOTIFYF(
+						"%s: Inode %lu [%s] has cluster[%i]=0x%08lx."
+						,isc->sc->name
+						,isc->inode_num
+						,isc->type
+						,c
+						,(unsigned long)isc->inode->cluster[c]
+					);
 				}
 			}
 		}
+		*/
 		
 		free(isc);
 		return;
@@ -1433,6 +2264,9 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 
 #define MALLOC1(var) MALLOCARRAY(var,1)
 
+void ext2_dump_file(struct scan_context * sc,const char * path,const char * filename);
+void ext2_redump_file(struct scan_context * sc,const char * path,const char * filename);
+
 bool ext2_fsck(const char * _name) {
 	struct scan_context * sc;
 	
@@ -1471,18 +2305,24 @@ bool ext2_fsck(const char * _name) {
 	sc->progress_bar=NULL;
 	sc->sb=NULL;
 	sc->dir=NULL;
-	sc->link_count=NULL;
+//	sc->link_count=NULL;
 //	sc->list_head=NULL;
 //	sc->list_tail=NULL;
-	sc->calculated_cluster_allocation_map=NULL;
-	sc->calculated_cluster_collision_map=NULL;
 	sc->calculated_inode_allocation_map=NULL;
 	sc->cluster_allocation_map=NULL;
 	sc->inode_allocation_map=NULL;
+	sc->comc.ccgroup=NULL;
+#ifdef COMC_IN_MEMORY
+	sc->comc.compr=NULL;
+#endif // #ifdef COMC_IN_MEMORY
+	
+	void * com_cache_thread_stack_memory=NULL;
+	void * ext2_read_tables_stack_memory=NULL;
 	
 	sc->bdev=bdev_lookup_bdev(sc->name=_name);
 	if (!sc->bdev) {
 		ERRORF("Couldn't lookup device %s.",sc->name);
+		free(sc);
 		return false;
 	}
 	
@@ -1492,18 +2332,27 @@ bool ext2_fsck(const char * _name) {
 	
 	MALLOC1(sc->sb);
 	
+//	sc->cs=2;
+	if (read_super(sc,sc->sb,0,2,true)) {
+		goto found_superblock;
+	}
+	
+	/*
 	sc->cs=0;
 	// First try to read super block from block 0
+//	eprintf("read_super(%u)\n",sc->cs);
 	if (read_super(sc,sc->sb,0,sc->cs,true)) {
 		goto found_superblock;
 	}
 	
 	// Now, try all cluster sizes we support.
 	for (sc->cs=1;sc->cs<64;sc->cs<<=1) {
+//		eprintf("read_super(%u)\n",sc->cs);
 		if (read_super(sc,sc->sb,0,sc->cs,true)) {
 			goto found_superblock;
 		}
 	}
+	*/
 	
 	ERRORF("Couldn't find ext2 superblock on %s.",sc->name);
 	goto cleanup;
@@ -1515,7 +2364,7 @@ found_superblock:
 	sc->cluster_size_Bytes=512*sc->cluster_size_Blocks;
 	sc->num_groups=((sc->sb->num_clusters-(sc->sb->first_data_cluster+1))/sc->sb->clusters_per_group)+1;
 	
-	NOTIFYF("%s: File system has %u cluster groups with a cluster size of %u.",sc->name,sc->num_groups,(unsigned)sc->cluster_size_Bytes);
+	NOTIFYF("%s: File system has %u cluster groups with a cluster size of %u bytes.",sc->name,sc->num_groups,(unsigned)sc->cluster_size_Bytes);
 	
 	eprintf("Pass 1b: Read and check group descriptor table ...\n");
 	
@@ -1524,27 +2373,47 @@ found_superblock:
 	MALLOCBYTES(sc->gdt,sc->size_of_gdt_Blocks*sc->block_size);
 	
 	sc->group_size_Blocks=(block_t)sc->sb->clusters_per_group*(block_t)sc->cluster_size_Blocks;
+	eprintf(
+		"sc->sb->clusters_per_group=%llu, sc->cluster_size_Blocks=%llu -> sc->group_size_Blocks=%llu\n"
+		,(unsigned long long)sc->sb->clusters_per_group
+		,(unsigned long long)sc->cluster_size_Blocks
+		,(unsigned long long)sc->group_size_Blocks
+	);
 	
 	bool have_gdt=false;
 	for (unsigned pass=0;pass<3;++pass) {
 		block_t sb_offset;
 		
 		for (unsigned group=0;group<sc->num_groups;++group) {
+		// unsigned group=-1; OPEN_PROGRESS_BAR_LOOP(1,group,sc->num_groups) ++group;
+//			eprintf("%u ",group);
+			
 			if (!pass == !group_has_super_block(sc->sb,group)) {
 				continue;
 			}
 			
+			/*
 			if (!group) {
 				sb_offset=(sc->cs/sc->cluster_size_Blocks+1)*sc->cluster_size_Blocks;
 			} else {
 				sb_offset=(block_t)group*sc->group_size_Blocks+sc->cluster_size_Blocks;
 			}
+			*/
+			sb_offset=(
+				1+(
+					(
+						2+(block_t)group*sc->group_size_Blocks
+					)/sc->cluster_size_Blocks
+				)
+			)*sc->cluster_size_Blocks;
 			
 			if (sc->size_of_gdt_Blocks==bdev_read(sc->bdev,sb_offset,sc->size_of_gdt_Blocks,(void*)sc->gdt)) {
 				have_gdt=true;
 				break;
 			}
+		// CLOSE_PROGRESS_BAR_LOOP()
 		}
+		
 		if (have_gdt) {
 			break;
 		}
@@ -1586,6 +2455,7 @@ found_superblock:
 		MALLOC1(sb2);
 		struct group_desciptor * gdt2;
 		MALLOCBYTES(gdt2,sc->size_of_gdt_Blocks*sc->block_size);
+		eprintf("malloc(gdt2)=%p\n",(void*)gdt2);
 		/*
 		int fd;
 		fd=open("/ramfs/gdt.0.img",O_WRONLY|O_CREAT|O_TRUNC,0666);
@@ -1594,7 +2464,27 @@ found_superblock:
 		*/
 		for (unsigned group=1;group<sc->num_groups;++group) {
 			if (group_has_super_block(sc->sb,group)) {
-				block_t sb_offset=(block_t)group*sc->group_size_Blocks;
+				block_t sb_offset;
+				
+				switch (sc->cluster_size_Blocks) {
+					case 2: {
+						sc->cluster_offset=1;
+						break;
+					}
+					
+					case 4: case 8: case 16: {
+						sc->cluster_offset=0;
+						break;
+					}
+					
+					default: {
+						assert(never_reached);
+						exit(2);
+					}
+				}
+				sb_offset=sc->cluster_size_Blocks*sc->cluster_offset+(block_t)group*sc->group_size_Blocks;
+				if (!sb_offset) sb_offset=2;
+				
 				if (!read_super(sc,sb2,group,sb_offset,false)) {
 					// read_super printed a suitable error message already, so skip it here.
 					continue;
@@ -1623,9 +2513,9 @@ found_superblock:
 #define CMP32(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup copy is %lu, should be %lu\n",#v,(unsigned long)sb2->v,(unsigned long)sc->sb->v);
 #define CMP16(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup copy is %lu, should be %lu\n",#v,(unsigned long)sb2->v,(unsigned long)sc->sb->v);
 #define CMP08(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup copy is %lu, should be %lu\n",#v,(unsigned long)sb2->v,(unsigned long)sc->sb->v);
-#define CMP32n(v,n) do { for (int i=0;i<n;++i) { CMP32(v[i]); } } while (0)
-#define CMP16n(v,n) do { for (int i=0;i<n;++i) { CMP16(v[i]); } } while (0)
-#define CMP08n(v,n) do { for (int i=0;i<n;++i) { CMP08(v[i]); } } while (0)
+#define CMP32n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup copy is %lu, should be %lu\n",#v,i,(unsigned long)sb2->v[i],(unsigned long)sc->sb->v[i]); } } while (0)
+#define CMP16n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup copy is %lu, should be %lu\n",#v,i,(unsigned long)sb2->v[i],(unsigned long)sc->sb->v[i]); } } while (0)
+#define CMP08n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup copy is %lu, should be %lu\n",#v,i,(unsigned long)sb2->v[i],(unsigned long)sc->sb->v[i]); } } while (0)
 				
 				CMP32(num_inodes);
 				CMP32(num_clusters);
@@ -1677,7 +2567,14 @@ found_superblock:
 				CMP32(first_meta_bg);
 				CMP32n(reserved,62);
 				
-				assert(!memcmp(sc->sb,sb2,sc->block_size));
+				if (memcmp(sc->sb,sb2,sc->block_size)) {
+					NOTIFYF(
+						"%s: Super blocks of groups 0 and %u differ"
+						,sc->name
+						,group
+					);
+				}
+				// assert(!memcmp(sc->sb,sb2,sc->block_size));
 				
 				if (1) { // Deactivate for VALGRIND if you like
 					if (sc->size_of_gdt_Blocks!=bdev_read(sc->bdev,(sb_offset/sc->cluster_size_Blocks+1)*sc->cluster_size_Blocks,sc->size_of_gdt_Blocks,(void*)gdt2)) {
@@ -1706,6 +2603,8 @@ found_superblock:
 			}
 		}
 		free(gdt2);
+		eprintf("free(gdt2 (%p))\n",(void*)gdt2);
+		gdt2=NULL;
 		free(sb2);
 		
 #if 0
@@ -1768,6 +2667,12 @@ recheck_compat_flags:
 			,sc->name
 			,(unsigned long)sc->sb->num_clusters
 			,(unsigned long long)bdev_get_size(sc->bdev)/sc->cluster_size_Blocks
+		);
+	} else {
+		NOTIFYF(
+			"%s: num_clusters=%lu"
+			,sc->name
+			,(unsigned long)sc->sb->num_clusters
 		);
 	}
 	
@@ -1905,30 +2810,30 @@ recheck_compat_flags:
 	}
 	if (sc->sb->in_compat&IN_COMPAT_RECOVER) {
 		if (sc->sb->rw_compat&RW_COMPAT_HAS_JOURNAL) {
-			ERRORF("%s: This file system contains a journal AND NEEDS RECOVERY, which I don't know how to handle. I'm going to ignore the journal and remove the 'needs recovery flag' after having the file system's error fixed.",sc->name);
+			ERRORF("%s: This file system contains a journal AND NEEDS RECOVERY, which I don't know how to handle. I'm going to ignore the journal and remove the 'needs recovery flag' after having the file system's errors fixed.",sc->name);
 			sc->sb->ro_compat&=~IN_COMPAT_RECOVER;
 		} else {
 			eprintf("%s: This file system is marked to not contain a journal, but needing recovery.",sc->name);
-			eprintf("%s: <j> Fix by making this file system to contain a journal.",sc->name);
-			eprintf("%s: <r> Fix by making this file system not needing recovery.",sc->name);
-			eprintf("%s: <n> Don't fix and quit now.",sc->name);
+			eprintf("%s: <j> Fix by marking this file system to contain a journal.",sc->name);
+			eprintf("%s: <r> Fix by marking this file system to not needing recovery.",sc->name);
+			eprintf("%s: <q> Don't fix and quit now.",sc->name);
 			int answer;
 			do {
 				answer=fgetc(stderr);
 				answer=tolower(answer);
-			} while (answer!='j' && answer!='r' && answer!='n');
+			} while (answer!='j' && answer!='r' && answer!='q');
 			switch (answer) {
 				case 'j':
-					printf("%s: This file system is marked to not contain a journal, but needing recovery. Fixed by marking file system containing a journal.",sc->name);
+					printf("This file system is marked to not contain a journal, but needing recovery. Fixed by marking file system containing a journal.\n"); fflush(stdout);
 					sc->sb->rw_compat&=~RW_COMPAT_HAS_JOURNAL;
 					write_super_blocks(sc->sb);
 					goto recheck_compat_flags;
 				case 'r':
-					printf("%s: This file system is marked to not contain a journal, but needing recovery. Fixed by marking file system not needing recovery.",sc->name);
+					printf("This file system is marked to not contain a journal, but needing recovery. Fixed by marking file system not needing recovery.\n"); fflush(stdout);
 					sc->sb->ro_compat&=~IN_COMPAT_RECOVER;
 					break;
-				case 'n':
-					printf("%s: This file system is marked to not contain a journal, but needing recovery. Not fixed.",sc->name);
+				case 'q':
+					printf("This file system is marked to not contain a journal, but needing recovery. Not fixed.\n"); fflush(stdout);
 					return false;
 				default:
 					assert(never_reached);
@@ -1936,9 +2841,14 @@ recheck_compat_flags:
 		}
 	}
 	if (sc->sb->in_compat&IN_COMPAT_JOURNAL_DEV) {
-		ERRORF("%s: This file system has the IN compatible feature flag JOURNAL_DEV set (this is not the HAS_JOURNAL flag neither the needs RECOVERy flag) which I don't know how to handle.",sc->name);
+		ERRORF("%s: This file system has the IN compatible feature flag JOURNAL_DEV set (external journal) which I currently don't handle.",sc->name);
 		return false;
 	}
+/*
+	if (sc->sb->rw_compat&RW_COMPAT_HAS_JOURNAL) {
+		INFOF("%s: Journal inode is %lu",sc->name,(unsigned long)sc->sb->journal_inode);
+	}
+*/
 	if (sc->sb->in_compat&IN_COMPAT_META_BG) {
 		ERRORF("%s: This file system has the IN compatible feature flag META_BG set which I don't know how to handle.",sc->name);
 		return false;
@@ -1995,12 +2905,40 @@ recheck_compat_flags:
 	
 	MALLOCBYTES(sc->cluster_allocation_map,cam_size_Bytes);
 	MALLOCBYTES(sc->inode_allocation_map,iam_size_Bytes);
-	MALLOCARRAY(sc->inode_table,sc->sb->num_inodes); // FIXME: BUG: Just for VALGRIND's extreme memory comsumption
-	
+	off_t inode_table_len;
+	{
+		int fd=open("/ramfs/inode_table",O_RDWR|O_CREAT|O_TRUNC,0600);
+		if (fd<0) {
+			eprintf("Oops, couldn't open/create file /ramfs/inode_table: %s",strerror(errno));
+			exit(2);
+		}
+		inode_table_len=sizeof(*sc->inode_table);
+		assert(sc->sb->num_inodes==(sc->sb->num_inodes/sc->sb->inodes_per_group)*sc->sb->inodes_per_group);
+		if ((sc->sb->num_inodes/sc->sb->inodes_per_group)>INODE_TABLE_ROUNDROUBIN) {
+			inode_table_len*=sc->sb->inodes_per_group*INODE_TABLE_ROUNDROUBIN;
+		} else {
+			inode_table_len*=sc->sb->num_inodes;
+		}
+		--inode_table_len;
+		if (inode_table_len!=lseek(fd,inode_table_len,SEEK_SET)) {
+			eprintf("Couldn't seek in file /ramfs/inode_table: %s",strerror(errno));
+			exit(2);
+		}
+		if (1!=write(fd,&inode_table_len,1)) {
+			eprintf("Couldn't write one byte to file /ramfs/inode_table: %s",strerror(errno));
+			exit(2);
+		}
+		++inode_table_len;
+//		sc->inode_table=mmap(NULL,inode_table_len,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
+		sc->inode_table=mmap(NULL,inode_table_len,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+		if (sc->inode_table==MAP_FAILED) {
+			eprintf("Couldn't mmap file /ramfs/inode_table: %s",strerror(errno));
+			exit(2);
+		}
+	}
+	MALLOCARRAY(sc->inode_link_count,sc->sb->num_inodes);
+	MALLOCARRAY(sc->inode_type_str,sc->sb->num_inodes);
 	MALLOCARRAY(sc->calculated_link_count_array,sc->sb->num_inodes);
-	
-	MALLOCBYTES(sc->calculated_cluster_allocation_map,cam_size_Bytes);
-	MALLOCBYTES(sc->calculated_cluster_collision_map,cam_size_Bytes);
 	MALLOCBYTES(sc->calculated_inode_allocation_map,iam_size_Bytes);
 	
 	for (unsigned ino=0;ino<sc->sb->num_inodes;++ino) {
@@ -2013,9 +2951,8 @@ recheck_compat_flags:
 	);
 */
 	
-	void * stack_memory;
-	
 	sc->num_clusterpointers=sc->cluster_size_Bytes/4;
+	sc->num_clusterpointers_shift=8+sc->sb->log_cluster_size;
 //	sc->cam_iam_it_Clusters=sc->cam_iam_it_Blocks/sc->cluster_size_Blocks;
 	
 //	MALLOC1(sc->list_head);
@@ -2023,8 +2960,6 @@ recheck_compat_flags:
 	
 	eprintf("Executing ext2_fsck via thread %i\n",gettid());
 	
-	memset(sc->calculated_cluster_allocation_map,0,cam_size_Bytes);
-	memset(sc->calculated_cluster_collision_map,0,cam_size_Bytes);
 	memset(sc->calculated_inode_allocation_map,0,iam_size_Bytes);
 	
 	MALLOC1(thread_head);
@@ -2032,8 +2967,8 @@ recheck_compat_flags:
 	thread_head->lock=btlock_lock_mk();
 	thread_tail->lock=btlock_lock_mk();
 	assert(thread_head->lock && thread_tail->lock);
-	thread_head->tid=0;
-	thread_tail->tid=0;
+//	thread_head->tid=0;
+//	thread_tail->tid=0;
 	thread_head->next=thread_tail; thread_head->prev=NULL;
 	thread_tail->prev=thread_head; thread_tail->next=NULL;
 	
@@ -2044,12 +2979,40 @@ recheck_compat_flags:
 	 * troubles if link_count is not initialized yet. The other way round 
 	 * would need taking special care in the clean up code.
 	 */
-	MALLOCARRAY(sc->link_count,sc->sb->num_inodes);
+//	MALLOCARRAY(sc->link_count,sc->sb->num_inodes);
 	MALLOCARRAY(sc->dir,sc->sb->num_inodes);
 	for (unsigned i=0;i<sc->sb->num_inodes;++i) {
 		sc->dir[i]=NULL;
-		sc->link_count[i]=0;
+//		sc->link_count[i]=0;
 	}
+	
+	sc->comc.debug_lock=btlock_lock_mk();
+	// u32 i=(sc->num_groups*sc->clusters_per_group)/65536;
+	u32 i=sc->sb->num_clusters/65536;
+	sc->comc.clusters_per_entry=1;
+	while (i) {
+		i>>=1;
+		sc->comc.clusters_per_entry<<=1;
+	}
+	sc->comc.size=(sc->sb->num_clusters+sc->comc.clusters_per_entry-1)/sc->comc.clusters_per_entry;
+	sc->comc.ccgroup=malloc(sc->comc.size*sizeof(*sc->comc.ccgroup));
+#ifdef COMC_IN_MEMORY
+	sc->comc.compr=malloc(sc->comc.size*sizeof(*sc->comc.compr));
+#endif // #ifdef COMC_IN_MEMORY
+	eprintf("sc->comc.ccgroup=malloc: %p..%p\n",(void*)sc->comc.ccgroup,((char*)sc->comc.ccgroup)+sc->comc.size*sizeof(*sc->comc.ccgroup)-1);
+	for (i=0;i<sc->comc.size;++i) {
+		sc->comc.ccgroup[i]=NULL;
+#ifdef COMC_IN_MEMORY
+		sc->comc.compr[i].ptr=NULL;
+		sc->comc.compr[i].len=0;
+#endif // #ifdef COMC_IN_MEMORY
+	}
+	eprintf("sc->comc.ccgroup was initialized\n");
+	sc->comc.head=NULL;
+	sc->comc.tail=NULL;
+	sc->comc.num_in_memory=0;
+	sc->comc.read_head=NULL;
+	sc->comc.read_tail=NULL;
 	
 	/*
 	 * We mis-use this variable here to mark, that the new cluster scan 
@@ -2062,7 +3025,7 @@ recheck_compat_flags:
 	assert(sc->cam_lock);
 	
 	sc->background=false;
-	sc->prereaded=0;
+	atomic_set(&sc->prereaded,0);
 	
 #if HAVE_LINUX_CLONE
 	/*
@@ -2080,38 +3043,109 @@ recheck_compat_flags:
 	check_inode(sc,4238222,true);
 	check_inode(sc,4238223,true);
 	*/
+	// check_inode(sc,6145418,true);
 #endif // #if HAVE_LINUX_CLONE
+	
+	/*
+	 * 858993459 is (2^32)/5.
+	 * Each group has five different types of maintainance cluster types:
+	 * 
+	 * super block (not in each group present)
+	 * group descriptor table (exactly present in the same groups in which a super block is present, too)
+	 * cluster allocation map (present in each group)
+	 * inode allocation map (present in each group)
+	 * inode table (present in each group)
+	 * 
+	 * Each of this get a different number, which will be added to -5*group number. That value is then 
+	 * used as if it would be an inode number.
+	 * 
+	 * This if clause is used to determine wether an overflow occurs, so we can notify the user about the 
+	 * fact, that inode numbers may be ambiguous.
+	 */
+	if (sc->num_groups>858993459
+	||  5*sc->num_groups+sc->sb->num_inodes<sc->sb->num_inodes) {
+		WARNINGF("%s: 5*num_groups + num_inodes is greater than 2^32. This is not a problem but it makes our internally used inode numbers ambiguous and hence may produce bogus messages.\n",sc->name);
+	}
 	
 	sc->waiting4threads=false;
 	sc->background=true;
 	sc->table_reader_group=0;
+	sc->com_cache_thread_lock=btlock_lock_mk();
 	
-	if (btclone(
-		&stack_memory,
-		ext2_read_tables,
-		65536,
-		CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD,
-		(void *)sc
-	)<=0) {
-		if (errno!=ENOSYS) eprintf("clone failed, now first we'll read in the tables and then process them (instead of doing both at the same time)\n");
-		sc->background=false;
-		ext2_read_tables(sc);
-	} else {
-		++live_child;
+	if (0) {
+		atomic_t x;
+#define INI() do { atomic_set(&x,-1); eprintf("atomic_set(&x,-1), atomic_get()=%i\n",atomic_get(&x)); } while (0)
+#define INC() do { eprintf("atomic_inc()=%s, ",atomic_inc(&x)?"true ":"false"); eprintf("atomic_get()=%i\n",atomic_get(&x)); } while (0)
+#define DEC() do { eprintf("atomic_dec()=%s, ",atomic_dec(&x)?"true ":"false"); eprintf("atomic_get()=%i\n",atomic_get(&x)); } while (0)
+#define CMPXCHG(ov,nv) do { eprintf("atomic_cmpxchg(%i,%i)=%i\n",ov,nv,atomic_cmpxchg(&x,ov,nv)); } while (0)
+		INI();
+		CMPXCHG( 1, 0);
+		CMPXCHG( 0, 2);
+		CMPXCHG(-1, 0);
+		CMPXCHG(-1, 1);
+		CMPXCHG( 0, 1);
+		CMPXCHG( 2, 3);
+		CMPXCHG( 1,-1);
+		INC();
+		/*
+		DEC();
+		INC();
+		INC();
+		INC();
+		DEC();
+		DEC();
+		*/
+#undef INI
+#undef INC
+#undef DEC
 	}
 	
-	/*
-	 * First, we mark all blocks uses by the cluster/inode allocation maps 
-	 * and inode table as in-use.
-	 */
 	{
-		unsigned num_clusters_per_group_for_inode_table=sc->sb->inodes_per_group/(sc->cluster_size_Bytes/sizeof(struct inode));
-		for (unsigned group=0;group<sc->num_groups;++group) {
-			MARK_CLUSTER_IN_USE(sc,sc->gdt[group].cluster_allocation_map);
-			MARK_CLUSTER_IN_USE(sc,sc->gdt[group].inode_allocation_map);
-			for (unsigned i=0;i<num_clusters_per_group_for_inode_table;++i) {
-				MARK_CLUSTER_IN_USE(sc,sc->gdt[group].inode_table+i);
-			}
+#ifdef BTCLONE
+		if (btclone(
+			&com_cache_thread_stack_memory,
+			com_cache_thread,
+			65536,
+			CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD,
+			(void *)sc
+		)<=0) {
+#else // #ifdef BTCLONE
+		pthread_t thread;
+		if (pthread_create(
+			&thread,
+			NULL,
+			com_cache_thread,
+			(void *)sc
+		)) {
+#endif // #ifdef BTCLONE, else
+			eprintf("clone failed, we can't proceed!");
+			exit(2);
+		}
+	}
+	
+	{
+#ifdef BTCLONE
+		if (btclone(
+			&ext2_read_tables_stack_memory,
+			ext2_read_tables,
+			65536,
+			CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD,
+			(void *)sc
+		)<=0) {
+#else // #ifdef BTCLONE
+		pthread_t thread;
+		if (pthread_create(
+			&thread,
+			NULL,
+			ext2_read_tables,
+			(void *)sc
+		)) {
+#endif // #ifdef BTCLONE, else
+			if (errno!=ENOSYS) eprintf("clone failed, now first we'll read in the tables and then process them (instead of doing both at the same time)\n");
+			sc->background=false;
+			ext2_read_tables(sc);
+		} else {
+			++live_child;
 		}
 	}
 	
@@ -2119,7 +3153,7 @@ recheck_compat_flags:
 	assert(live_child_progress_bar);
 	
 	{
-		u32 size_of_gdt_Clusters=sc->size_of_gdt_Blocks/sc->cluster_size_Blocks;
+		u32 size_of_gdt_Clusters=(sc->size_of_gdt_Blocks+sc->cluster_size_Blocks-1)/sc->cluster_size_Blocks;
 		unsigned group=0;
 		unsigned long inode_num=1;
 		
@@ -2134,45 +3168,50 @@ recheck_compat_flags:
 			
 //			eprintf("Parent's current group: %u\r",group);
 			
-			if (sc->background) process_table_for_group(group,sc);
+//			if (sc->background) process_table_for_group(group,sc);
 			
 			if (group_has_super_block(sc->sb,group)) {
-				u32 cluster=group*(sc->group_size_Blocks/sc->cluster_size_Blocks);
-				if (!group && sc->cluster_size_Bytes<2048) {
+				block_t sb_offset=2+group*sc->group_size_Blocks;
+				u32 cluster=sb_offset/sc->cluster_size_Blocks;
+				if (!group) {
 					/*
-					 * In the first cluster group, the 
-					 * super block may start at byte offset 
-					 * 1024 instead of 0. If The cluster 
-					 * size is >=2048, that's no problem, as 
-					 * the entire super block still resides 
-					 * in cluster 0. On file systems with a 
-					 * cluster size of 1024 however, the 
-					 * super block uses cluster 1. So, 
-					 * cluster 0 is unused (and all other 
-					 * structures move one cluster to 
-					 * higher addresses). So, mark cluster 
-					 * 0 as being used and increment cluster 
-					 * number for super block.
+					 * The super blocks start at offset 1024 
+					 * in each cluster group. The block before 
+					 * is free to use for data. Exception in 
+					 * the first cluster group, the blocks 
+					 * before are reserved. So, mark all 
+					 * clusters before the super block cluster 
+					 * in group 0 as being used.
 					 */
-					MARK_CLUSTER_IN_USE(sc,cluster++);
+					for (u32 c=1;c<cluster;++c) {
+						if (PRINT_MARK_SB0GAP) eprintf("Marking cluster %lu in use (gap before super block in group 0)\n",(unsigned long)c);
+						MARK_CLUSTER_IN_USE_BY(sc,c,-4); // Same ID as the super block of group 0 itself
+					}
 				}
 				
-				// Mark cluster containing super block as in-use
-				MARK_CLUSTER_IN_USE(sc,cluster);
+				if (cluster || !sc->cluster_offset) {
+					// Mark cluster containing super block as in-use
+					if (PRINT_MARK_SB) eprintf("Marking cluster %lu in use (super block of group %u)\n",(unsigned long)cluster,group);
+					MARK_CLUSTER_IN_USE_BY(sc,cluster,-4UL-(5UL*group));
+				}
 				
+				++cluster;
+				if (PRINT_MARK_GDT) eprintf("Marking clusters %lu .. %lu in use (group descriptor table in group %u)\n",(unsigned long)cluster,(unsigned long)(cluster+size_of_gdt_Clusters-1),group);
 				// Mark all clusters containing the group descriptor table as in-use
-				for (u32 i=0;i<size_of_gdt_Clusters;++i) {
-					MARK_CLUSTER_IN_USE(sc,++cluster);
-				}
+				MARK_CLUSTERS_IN_USE_BY(sc,cluster,size_of_gdt_Clusters,-5UL-(5UL*group));
 			}
 			
 			{
 				struct thread * walk=thread_head->next;
-				while (walk->tid) {
+				while (walk->next) {
+#ifdef BTCLONE
 					if (kill(walk->tid,0)) {
+						free(walk->stack_memory);
+#else // #ifdef BTCLONE
+					if (!pthread_tryjoin_np(walk->thread,NULL)) {
+#endif // #ifdef BTCLONE, else
 						walk->next->prev=walk->prev;
 						walk->prev->next=walk->next;
-						free(walk->stack_memory);
 						btlock_lock_free(walk->lock);
 						struct thread * w=walk;
 						walk=walk->prev;
@@ -2188,11 +3227,12 @@ recheck_compat_flags:
 				
 				check_inode(sc,inode_num,false);
 			}
+			
 			++group;
 			
+			atomic_dec(&sc->prereaded);
+			
 		CLOSE_PROGRESS_BAR_LOOP()
-		
-		progress_bar_free(live_child_progress_bar);
 	}
 	
 	/*
@@ -2200,7 +3240,7 @@ recheck_compat_flags:
 	 * really are in-use.
 	 */
 	for (unsigned ino=1;ino<sc->sb->first_inode;++ino) {
-		xset_bit(sc->calculated_inode_allocation_map,ino-1);
+		set_calculated_inode_allocation_map_bit(sc,ino);
 	}
 	
 	eprintf("Waiting for unfinished background jobs to finish ...\n");
@@ -2209,11 +3249,15 @@ recheck_compat_flags:
 	
 	while (thread_head->next!=thread_tail) {
 		struct thread * walk=thread_head->next;
-		while (walk->tid) {
+		while (walk->next) {
+#ifdef BTCLONE
 			if (kill(walk->tid,0)) {
+				free(walk->stack_memory);
+#else // #ifdef BTCLONE
+			if (!pthread_tryjoin_np(walk->thread,NULL)) {
+#endif // #ifdef BTCLONE, else
 				walk->next->prev=walk->prev;
 				walk->prev->next=walk->next;
-				free(walk->stack_memory);
 				btlock_lock_free(walk->lock);
 				struct thread * w=walk;
 				walk=walk->prev;
@@ -2226,22 +3270,12 @@ recheck_compat_flags:
 		sleep(1);
 	}
 	
+	progress_bar_free(live_child_progress_bar);
+	
 	assert(!live_child);
 	
-	if (memcmp(sc->cluster_allocation_map,sc->calculated_cluster_allocation_map,(size_t)sc->cluster_size_Bytes*(size_t)sc->num_groups)) {
-		ERRORF("%s: cluster allocation map differs!",sc->name);
-	}
-	
-	for (unsigned i=0;i<(size_t)sc->cluster_size_Bytes*(size_t)sc->num_groups;++i) {
-		if (sc->calculated_cluster_collision_map[i]) {
-			ERRORF("%s: There are doubly used clustes.",sc->name);
-			i=-2;
-		}
-	}
-	
-	if (memcmp(sc->inode_allocation_map,sc->calculated_inode_allocation_map,(sc->sb->num_inodes+7)/8)) {
-		ERRORF("%s: inode allocation map differs!",sc->name);
-	}
+	int fd;
+	gzFile gzf;
 	
 #define OPEN(filename,flags,mode) do { \
 	fd=open(filename,flags,mode); \
@@ -2257,20 +3291,159 @@ recheck_compat_flags:
 	} \
 } while (0)
 	
-	int fd;
+#define GZOPEN(filename,mode) do { \
+	gzf=gzopen(filename,mode); \
+	if (!gzf) { \
+		eprintf( \
+			"gzopen(»%s«,»%s«): %s\n" \
+			,filename \
+			,mode \
+			,strerror(errno) \
+		); \
+		goto cleanup; \
+	} \
+} while (0)
+	
+	for (u32 inode_num=1;inode_num<=sc->sb->num_inodes;++inode_num) {
+//		struct inode * inode;
+//		char * type;
+		
+//		do_typecheck_inode(sc,inode_num,&inode,&type,NULL);
+		if (sc->inode_link_count[inode_num-1]!=sc->calculated_link_count_array[inode_num-1]) {
+			ERRORF(
+				"%s: Inode %lu [%s]: Link count is %u, should be %u."
+				,sc->name,(unsigned long)inode_num,sc->inode_type_str[inode_num-1]
+				,(unsigned)sc->inode_link_count[inode_num-1]
+				,(unsigned)sc->calculated_link_count_array[inode_num-1]
+			);
+		}
+	}
+	
+	eprintf("Started building calculated_cluster_allocation_map from cluster_owning_map\n");
+	MALLOCBYTES(sc->calculated_cluster_allocation_map,cam_size_Bytes);
+	memset(sc->calculated_cluster_allocation_map,0,cam_size_Bytes);
+	
+	GZOPEN("/ramfs/cluster_owner_map.calculated.gz","wb1");
+	{
+		u32 ccg=0;
+		if (unlikely(sc->sb->num_clusters<sc->comc.clusters_per_entry)) {
+			sc->comc.clusters_per_entry=sc->sb->num_clusters;
+		}
+		u32 last_ccg=(sc->sb->num_clusters-1)/sc->comc.clusters_per_entry;
+		u32 nc=sc->comc.clusters_per_entry;
+		u32 cluster;
+		for (cluster=sc->cluster_offset;cluster<sc->sb->num_clusters;cluster+=nc,++ccg) {
+			struct com_cache_entry * ccge=get_com_cache_entry(sc,ccg,cluster);
+			if (unlikely(ccg==last_ccg)) {
+				nc=sc->sb->num_clusters-cluster;
+			}
+			gzwrite(gzf,ccge->entry,4*nc);
+			for (size_t c=0;c<nc;++c) {
+				if (ccge->entry[c]) {
+					set_calculated_cluster_allocation_map_bit(sc,cluster+c);
+				}
+			}
+			release(sc,ccge);
+		}
+		assert(cluster==sc->sb->num_clusters);
+		for (;cluster<=sc->num_groups*8*sc->cluster_size_Bytes-1+sc->cluster_offset;++cluster) {
+			set_calculated_cluster_allocation_map_bit(sc,cluster);
+		}
+		/*
+		u32 num_clusters=sc->sb->num_clusters;
+		u32 ccg=0;
+		struct com_cache_entry * ccge;
+		while (num_clusters>sc->comc.clusters_per_entry) {
+			ccge=get_com_cache_entry(sc,ccg);
+			gzwrite(gzf,ccge->entry,4*sc->comc.clusters_per_entry);
+			release(sc,ccge);
+			++ccg;
+			num_clusters-=sc->comc.clusters_per_entry;
+		}
+		ccge=get_com_cache_entry(sc,ccg);
+		gzwrite(gzf,ccge->entry,4*num_clusters);
+		release(sc,ccge);
+		*/
+	}
+	gzclose(gzf);
+	exit_request_com_cache_thread=true;
+	CCT_WAKE(); // Make sure, we won't wait senselessly for the com_cache_thread.
+	CCT_WAIT(); // Wait for that thread to exit
+	assert(!exit_request_com_cache_thread);
+	
+	/*
+	for (u32 cluster=0;cluster<sc->sb->num_clusters;++cluster) {
+		if (get_owner(sc,cluster)) {
+			set_calculated_cluster_allocation_map_bit(sc,cluster);
+		}
+	}
+	*/
+	eprintf("Finisched building calculated_cluster_allocation_map from cluster_owning_map\n");
+	
+	if (memcmp(sc->cluster_allocation_map,sc->calculated_cluster_allocation_map,(size_t)sc->cluster_size_Bytes*(size_t)sc->num_groups)) {
+		eprintf("%s: cluster allocation map differs:",sc->name);
+		bool valid_problem_range=false;
+		bool really_allocated=true;
+		u32 first_cluster=0;
+		for (u32 cluster=1;cluster<sc->sb->num_clusters;++cluster) {
+			bool on_disk_flag=get_cluster_allocation_map_bit(sc,cluster);
+			bool calculated_flag=get_calculated_cluster_allocation_map_bit(sc,cluster);
+			bool print=false;
+			bool new_range=false;
+			
+			if (likely(on_disk_flag==calculated_flag)) {
+				if (unlikely(valid_problem_range)) {
+					print=true;
+				}
+			} else {
+				if (likely(!valid_problem_range) || unlikely(really_allocated!=calculated_flag)) {
+					new_range=true;
+					if (likely(valid_problem_range)) {
+						print=true;
+					}
+				}
+			}
+			if (unlikely(print)) {
+				valid_problem_range=false;
+				eprintf(" %c",really_allocated?'+':'-');
+				if (unlikely(first_cluster==cluster-1)) {
+					eprintf("%lu",(unsigned long)first_cluster);
+				} else {
+					eprintf("(%lu..%lu)",(unsigned long)first_cluster,(unsigned long)cluster-1);
+				}
+			}
+			if (new_range) {
+				valid_problem_range=true;
+				really_allocated=calculated_flag;
+				first_cluster=cluster;
+			}
+		}
+		eprintf("\n");
+	}
+	
 	{
 		int w;
-		
-		OPEN("/ramfs/cluster_allocation_map.read",O_WRONLY|O_CREAT|O_TRUNC,0666);
-		w=write(fd,sc->cluster_allocation_map,cam_size_Bytes);
-		close(fd);
 		
 		OPEN("/ramfs/cluster_allocation_map.calculated",O_WRONLY|O_CREAT|O_TRUNC,0666);
 		w=write(fd,sc->calculated_cluster_allocation_map,cam_size_Bytes);
 		close(fd);
+		free(sc->calculated_cluster_allocation_map);
 		
-		OPEN("/ramfs/cluster_allocation_map.collisions",O_WRONLY|O_CREAT|O_TRUNC,0666);
-		w=write(fd,sc->calculated_cluster_collision_map,cam_size_Bytes);
+		/*
+		for (unsigned i=0;i<(size_t)sc->cluster_size_Bytes*(size_t)sc->num_groups;++i) {
+			if (sc->calculated_cluster_collision_map[i]) {
+				ERRORF("%s: There are doubly used clustes.",sc->name);
+				i=-2;
+			}
+		}
+		*/
+		
+		if (memcmp(sc->inode_allocation_map,sc->calculated_inode_allocation_map,(sc->sb->num_inodes+7)/8)) {
+			ERRORF("%s: inode allocation map differs!",sc->name);
+		}
+		
+		OPEN("/ramfs/cluster_allocation_map.read",O_WRONLY|O_CREAT|O_TRUNC,0666);
+		w=write(fd,sc->cluster_allocation_map,cam_size_Bytes);
 		close(fd);
 		
 		OPEN("/ramfs/inode_allocation_map.read",O_WRONLY|O_CREAT|O_TRUNC,0666);
@@ -2302,23 +3475,445 @@ cleanup:
 				}
 			}
 		}
+		if (sc->com_cache_thread_lock) btlock_lock_free(sc->com_cache_thread_lock);
+		free(sc->inode_link_count);
+		free(sc->inode_type_str);
 		free(sc->gdt);
-		free(sc->inode_table);
+//		free(sc->inode_table);
+		munmap(sc->inode_table,inode_table_len);
 		free(sc->cam_lock);
 		free(sc->progress_bar);
 		free(sc->sb);
 		free(sc->dir);
-		free(sc->link_count);
+//		free(sc->link_count);
 //		free(sc->list_head);
 //		assert(sc->list_tail==sc->list_head);
-		free(sc->calculated_cluster_allocation_map);
-		free(sc->calculated_cluster_collision_map);
 		free(sc->calculated_inode_allocation_map);
 		free(sc->cluster_allocation_map);
 		free(sc->inode_allocation_map);
+		free(sc->calculated_link_count_array);
+		if (sc->comc.ccgroup) {
+			for (i=0;i<sc->comc.size;++i) {
+				if (sc->comc.ccgroup[i]) {
+					CCE_LOCK_FREE(sc->comc.ccgroup[i]);
+					free(sc->comc.ccgroup[i]->entry);
+					free(sc->comc.ccgroup[i]);
+				}
+			}
+		}
+#ifdef COMC_IN_MEMORY
+		if (sc->comc.compr) {
+			for (i=0;i<sc->comc.size;++i) {
+				free(sc->comc.compr[i].ptr);
+			}
+		}
+		eprintf("free(sc->comc.compr (%p));\n",(void*)sc->comc.compr);
+		free(sc->comc.compr);
+#endif // #ifdef COMC_IN_MEMORY
+		eprintf("free(sc->comc.ccgroup (%p));\n",(void*)sc->comc.ccgroup);
+		free(sc->comc.ccgroup);
+		btlock_lock_free(sc->comc.debug_lock);
 		free(sc);
+#ifdef BTCLONE
+		free(com_cache_thread_stack_memory);
+		free(ext2_read_tables_stack_memory);
+#endif // #ifdef BTCLONE
 	}
 	return retval;
+}
+
+struct fs_inode {
+	struct scan_context * fs; // struct fs * fs
+	u32 number;
+	struct inode data;
+	u32 nind_number[4];
+	u8 * nind_buffer[4];
+};
+
+struct fs_inode * ext2_read_inode(struct scan_context * sc,u32 ino) {
+	struct fs_inode * retval=malloc(sizeof(*retval));
+	u32 bs=bdev_get_block_size(sc->bdev);
+	u8 block_buffer[bs];
+	u32 ino_group=(ino-1)/sc->sb->inodes_per_group;
+	u32 ino_block=(ino-1)%sc->sb->inodes_per_group*sizeof(retval->data)/bs;
+	u32 ino_offset=(ino-1)%sc->sb->inodes_per_group*sizeof(retval->data)%bs;
+	
+	if (!retval) return NULL;
+	
+	if (1!=bdev_read(sc->bdev,sc->cluster_size_Blocks*sc->gdt[ino_group].inode_table+ino_block,1,block_buffer)) {
+		free(retval);
+		return NULL;
+	}
+	
+	memcpy(&retval->data,block_buffer+ino_offset,sizeof(retval->data));
+	retval->number=ino;
+	retval->fs=sc;
+	
+	retval->nind_number[0]=0xdeadbeef;
+	retval->nind_buffer[0]=(u8*)0xdeadbeef;
+	
+	for (int i=1;i<4;++i) {
+		retval->nind_number[i]=0;
+		retval->nind_buffer[i]=malloc(sc->cluster_size_Bytes);
+	}
+	/*
+	eprintf("clusters[]: {");
+	for (int i=0;i<15;++i) {
+		if (i) eprintf(",");
+		eprintf(" %lu",retval->data.cluster[i]);
+	}
+	eprintf(" }\n");
+	*/
+	return retval;
+}
+
+void ext2_put_inode(struct fs_inode * inode) {
+	for (int i=1;i<4;++i) {
+		free(inode->nind_buffer[i]);
+	}
+	free(inode);
+}
+
+size_t ext2_read_clusters(struct scan_context * sc,u32 absolute_cluster,size_t num,u8 * buffer) {
+	unsigned cs=sc->cluster_size_Blocks;
+	return bdev_read(sc->bdev,cs*absolute_cluster,cs*num,buffer)/cs;
+}
+
+bool ext2_read_cluster(struct scan_context * sc,u32 absolute_cluster,u8 * buffer) {
+	return ext2_read_clusters(sc,absolute_cluster,1,buffer);
+}
+
+size_t ext2_write_clusters(struct scan_context * sc,u32 absolute_cluster,size_t num,const u8 * buffer) {
+	unsigned cs=sc->cluster_size_Blocks;
+	return bdev_write(sc->bdev,cs*absolute_cluster,cs*num,buffer)/cs;
+}
+
+bool ext2_write_cluster(struct scan_context * sc,u32 absolute_cluster,const u8 * buffer) {
+	return ext2_write_clusters(sc,absolute_cluster,1,buffer);
+}
+
+u32 ext2_inode_translate_cluster(struct fs_inode * inode,u32 relative_cluster) {
+	u32 absolute_cluster=0xdeadbeef,*pointers;
+	u32 num[4]={
+		NUM_ZIND<<(0*inode->fs->num_clusterpointers_shift),
+		NUM_SIND<<(1*inode->fs->num_clusterpointers_shift),
+		NUM_DIND<<(2*inode->fs->num_clusterpointers_shift),
+		NUM_TIND<<(3*inode->fs->num_clusterpointers_shift),
+	};
+	u32 ptr[4]={
+		FIRST_ZIND,
+		FIRST_SIND,
+		FIRST_DIND,
+		FIRST_TIND,
+	};
+	u32 shift[4]={
+		0*inode->fs->num_clusterpointers_shift,
+		1*inode->fs->num_clusterpointers_shift,
+		2*inode->fs->num_clusterpointers_shift,
+		3*inode->fs->num_clusterpointers_shift,
+	};
+	int level;
+	
+	for (level=0;level<4;++level) {
+		if (relative_cluster<num[level]) {
+//			eprintf("ext2_inode_read_relative_cluster: level=%i\n",level);
+//			eprintf("idx=%u\n",(unsigned)(ptr[level]+(relative_cluster>>shift[level])));
+			absolute_cluster=inode->data.cluster[ptr[level]+(relative_cluster>>shift[level])];
+//			eprintf("absolute_cluster=%lu\n",(unsigned long)absolute_cluster);
+			while (level) {
+				if (inode->nind_number[level]!=absolute_cluster) {
+					if (likely(absolute_cluster)) {
+						if (unlikely(!ext2_read_cluster(inode->fs,absolute_cluster,inode->nind_buffer[level]))) {
+							return -1;
+						}
+					} else {
+						return 0;
+					}
+					inode->nind_number[level]=absolute_cluster;
+				}
+				pointers=(u32*)inode->nind_buffer[level];
+				u32 idx=relative_cluster>>shift[--level];
+				absolute_cluster=pointers[idx];
+				relative_cluster-=idx<<shift[level];
+			}
+			break;
+		}
+		relative_cluster-=num[level];
+	}
+	if (level==4) return 0;
+	return absolute_cluster;
+}
+
+void ext2_inode_write_relative_cluster(struct fs_inode * inode,u32 relative_cluster,const u8 * buffer) {
+	u32 absolute_cluster=ext2_inode_translate_cluster(inode,relative_cluster);
+	if (absolute_cluster==(u32)-1) {
+		// error
+		return;
+	}
+	if (!absolute_cluster) {
+		// can't fill holes atm
+		return;
+	} else {
+		if (!ext2_write_cluster(inode->fs,absolute_cluster,buffer)) {
+			// error
+			return;
+		}
+	}
+	// ok ;-)
+	return;
+}
+
+u8 * ext2_inode_read_relative_cluster(struct fs_inode * inode,u32 relative_cluster) {
+	u8 * retval=malloc(inode->fs->cluster_size_Bytes);
+	if (!retval) return NULL;
+	u32 absolute_cluster=ext2_inode_translate_cluster(inode,relative_cluster);
+	if (absolute_cluster==(u32)-1) {
+		return NULL;
+	}
+	if (!absolute_cluster) {
+		memset(retval,0,inode->fs->cluster_size_Bytes);
+	} else {
+		if (!ext2_read_cluster(inode->fs,absolute_cluster,retval)) {
+			free(retval);
+			return NULL;
+		}
+	}
+	return retval;
+	
+	/*
+	if (relative_cluster<NUM_ZIND) {
+		absolute_cluster=inode->data.isc->inode->cluster[relative_cluster];
+	} else {
+		relative_cluster-=NUM_ZIND;
+		if (relative_cluster<isc->sc->num_clusterpointers) {
+			absolute_cluster=inode->data.isc->inode->cluster[FIRST_SIND];
+		} else {
+			relative_cluster-=isc->sc->num_clusterpointers;
+			if (relative_cluster<isc->sc->num_clusterpointers*isc->sc->num_clusterpointers) {
+				absolute_cluster=inode->data.isc->inode->cluster[FIRST_DIND];
+			} else {
+				relative_cluster-=isc->sc->num_clusterpointers*isc->sc->num_clusterpointers;
+				if (relative_cluster<isc->sc->num_clusterpointers*isc->sc->num_clusterpointers*isc->sc->num_clusterpointers) {
+					absolute_cluster=inode->data.isc->inode->cluster[FIRST_TIND];
+				} else {
+					absolute_cluster=0;
+				}
+				if (nind_number[3]!=absolute_cluster) {
+					nind_number[3]=absolute_cluster;
+					if (likely(absolute_cluster)) {
+						free(nind_number[3]);
+						nind_buffer[3]=ext2_read_cluster(absolute_cluster);
+					} else {
+						memset(nind_buffer[3],0,sc->cluster_size_Bytes);
+					}
+				}
+				pointers=nind_buffer[3];
+				absolute_cluster=pointers[relative_cluster/isc->sc->num_clusterpointers*isc->sc->num_clusterpointers];
+			}
+			if (nind_number[2]!=absolute_cluster) {
+				nind_number[2]=absolute_cluster;
+				if (likely(absolute_cluster)) {
+					free(nind_number[2]);
+					nind_buffer[2]=ext2_read_cluster(absolute_cluster);
+				} else {
+					memset(nind_buffer[2],0,sc->cluster_size_Bytes);
+				}
+			}
+			pointers=nind_buffer[2];
+			absolute_cluster=pointers[relative_cluster/isc->sc->num_clusterpointers];
+		}
+		if (nind_number[1]!=absolute_cluster) {
+			nind_number[1]=absolute_cluster;
+			if (likely(absolute_cluster)) {
+				free(nind_number[1]);
+				nind_buffer[1]=ext2_read_cluster(absolute_cluster);
+			} else {
+				memset(nind_buffer[1],0,sc->cluster_size_Bytes);
+			}
+		}
+		pointers=nind_buffer[1];
+		absolute_cluster=pointers[relative_cluster];
+	}
+	if (nind_number[0]!=absolute_cluster) {
+		nind_number[0]=absolute_cluster;
+		if (likely(absolute_cluster)) {
+			free(nind_buffer[0]);
+			nind_buffer[0]=ext2_read_cluster(absolute_cluster);
+		} else {
+			if (unlikely(!nind_buffer[0])) {
+				nind_buffer[0]=malloc(sc->cluster_size_Bytes);
+			}
+			memset(nind_buffer[0],0,sc->cluster_size_Bytes);
+		}
+	}
+	return nind_buffer[0];
+	*/
+}
+
+u32 ext2_lookup_relative_path(struct scan_context * sc,u32 cwd,const char * path) {
+	u8 * buffer;
+	size_t clen;
+	
+recheck_path:
+	clen=0;
+	while (path[clen] && path[clen]!='/') ++clen;
+	if (!clen) {
+		if (!*path) {
+			return cwd;
+		}
+		++path;
+		goto recheck_path;
+	}
+//	eprintf("ext2_lookup_relative_path: Searching for entry »%.*s«\n",clen,path);
+	struct fs_inode * inode=ext2_read_inode(sc,cwd);
+	/*
+	u32 num_clusters=inode->data.size/sc->cluster_size_Bytes;
+	eprintf("inode->data.size=%lu\n",(unsigned long)inode->data.size);
+	eprintf("num_clusters=%lu\n",(unsigned long)num_clusters);
+	*/
+	u32 num_clusters=NUM_ZIND
+		+(1<<(1*inode->fs->num_clusterpointers_shift))
+		+(1<<(2*inode->fs->num_clusterpointers_shift))
+		+(1<<(3*inode->fs->num_clusterpointers_shift))
+	;
+	for (u32 cluster=0;cluster<num_clusters;++cluster) {
+//		eprintf(">>> ext2_inode_read_relative_cluster(inode,%lu)\n",(unsigned long)cluster);
+		if (unlikely(!(buffer=ext2_inode_read_relative_cluster(inode,cluster)))) {
+//			eprintf("Couldn't read relative cluster %lu: %s\n",(unsigned long)cluster,strerror(errno));
+		} else {
+//			eprintf("<<< ext2_inode_read_relative_cluster(inode,%lu)\n",(unsigned long)cluster);
+			/*
+			 * Structure of a record:
+			 *
+			 * u32 inode;
+			 * u16 reclen;
+			 * u8  filename_len;
+			 * u8  filetype;
+			 * u8  filename[(filename_len+3)&-4];
+			 * 
+			 * The filename is NOT null-terminated.
+			 * If inode is zero, the entry doesn't describe any object (maybe it's 
+			 * left over after a delete) and can just be ignored (or used to store 
+			 * a new file name). The last entry uses the entire space of it's 
+			 * containing cluster so filling it up. The next entry starts in the 
+			 * next cluster.
+			 */
+			
+			unsigned long offset=0;
+			
+			while (offset<inode->fs->cluster_size_Bytes) {
+				u32 ino=0
+					+((u32)buffer[offset+0]    )
+					+((u32)buffer[offset+1]<< 8)
+					+((u32)buffer[offset+2]<<16)
+					+((u32)buffer[offset+3]<<24)
+				;
+				u16 reclen=0
+					+((u32)buffer[offset+4]    )
+					+((u32)buffer[offset+5]<< 8)
+				;
+				if (!reclen) {
+					break;
+				}
+				if (!ino) {
+					offset+=reclen;
+					continue;
+				}
+				
+				u8 filename_len=0
+					+((u32)buffer[offset+6]    )
+				;
+				/*
+				u8 filetype=0
+					+((u32)buffer[offset+7]    )
+				;
+				*/
+//				eprintf("\tConsidering entry (%10lu) »%.*s« [%u]\n",(unsigned long)ino,filename_len,buffer+offset+8,(unsigned)reclen);
+				if (clen==filename_len
+				&&  !memcmp(buffer+offset+8,path,filename_len)) {
+					eprintf("\t\tFOUND »%s« ;)\n",path);
+					free(buffer);
+					if (ino>inode->fs->sb->num_inodes) {
+						ERRORF(
+							"%s: Can't open object with name »%.*s«: Illegal inode %lu."
+							,inode->fs->name
+							,filename_len
+							,path
+							,(unsigned long)ino
+						);
+						ext2_put_inode(inode);
+						return 0;
+					}
+					ext2_put_inode(inode);
+					return ext2_lookup_relative_path(sc,ino,path+clen+1);
+				}
+				offset+=reclen;
+			}
+		}
+	}
+	errno=ENOENT;
+	return 0;
+}
+
+u32 ext2_lookup_absolute_path(struct scan_context * sc,const char * path) {
+	if (path[0]!='/') {
+		errno=EINVAL;
+		return 0;
+	}
+	return ext2_lookup_relative_path(sc,2,path+1);
+}
+
+void ext2_dump_file(struct scan_context * sc,const char * path,const char * filename) {
+	u32 ino=ext2_lookup_absolute_path(sc,path);
+	if (!ino) {
+		ERRORF("%s: Couldn't locate inode via path »%s«: %s.",sc->name,path,strerror(errno));
+	} else {
+		int fd=open(filename,O_WRONLY|O_CREAT|O_TRUNC,0666);
+		if (fd<0) {
+			ERRORF("%s: Couldn't open file »%s«: %s.",sc->name,filename,strerror(errno));
+			return;
+		}
+		struct fs_inode * inode=ext2_read_inode(sc,ino);
+		u32 num_clusters=(inode->data.size+sc->cluster_size_Bytes-1)/sc->cluster_size_Bytes;
+		for (u32 cluster=0;cluster<num_clusters;++cluster) {
+			u8 * buffer;
+			buffer=ext2_inode_read_relative_cluster(inode,cluster);
+			int w=write(fd,buffer,sc->cluster_size_Bytes);
+			if (w!=(int)sc->cluster_size_Bytes) {
+				ERRORF("%s: Couldn't write to file »%s«: %s.",sc->name,filename,strerror(errno));
+				break;
+			}
+			free(buffer);
+		}
+		close(fd);
+		ext2_put_inode(inode);
+	}
+}
+
+void ext2_redump_file(struct scan_context * sc,const char * path,const char * filename) {
+	u32 ino=ext2_lookup_absolute_path(sc,path);
+	if (!ino) {
+		ERRORF("%s: Couldn't locate inode via path »%s«: %s.",sc->name,path,strerror(errno));
+	} else {
+		int fd=open(filename,O_RDONLY);
+		if (fd<0) {
+			ERRORF("%s: Couldn't open file »%s«: %s.",sc->name,filename,strerror(errno));
+			return;
+		}
+		struct fs_inode * inode=ext2_read_inode(sc,ino);
+		u32 num_clusters=(inode->data.size+sc->cluster_size_Bytes-1)/sc->cluster_size_Bytes;
+		u8 buffer[sc->cluster_size_Bytes];
+		for (u32 cluster=0;cluster<num_clusters;++cluster) {
+			int r=read(fd,buffer,sc->cluster_size_Bytes);
+			if (r!=(int)sc->cluster_size_Bytes) {
+				ERRORF("%s: Couldn't read from file »%s«: %s.",sc->name,filename,strerror(errno));
+				break;
+			}
+			ext2_inode_write_relative_cluster(inode,cluster,buffer);
+		}
+		close(fd);
+		ext2_put_inode(inode);
+	}
 }
 
 /*
@@ -2338,12 +3933,6 @@ struct fs_driver {
 struct fs {
 	struct fs_driver * driver;
 	struct fs_file_handle * root;
-};
-
-struct fs_inode {
-	struct fs * fs;
-	u32 number;
-	struct inode * data;
 };
 
 struct fs_file {
@@ -2393,14 +3982,16 @@ struct fs_dir_handle {
  *    with symbolic links. Or we may not access "/usr" and then chdir ".." to 
  *    reach "/". We have to see ...
  */
-#if 0
-static struct fs * mount(struct fs_driver * driver,char * name,char * args) {
+// static
+struct fs * ext2_mount(struct fs_driver * driver,char * name,char * args) {
 	ignore(driver);
-	struct fs_dir * root_dir=...;
+	ignore(name);
+	ignore(args);
+//	struct fs_dir * root_dir=...;
 	
-	return fs_register_fs(driver,name,root_dir,umount);
+//	return fs_register_fs(driver,name,root_dir,umount);
+	return NULL;
 }
-#endif // #if 0
 
 #if 0
 
@@ -2438,7 +4029,7 @@ static block_t loop_write(struct dev * dev,block_t first,block_t num,const unsig
 static struct fs * fs_init(struct fs_driver * fs,char * name,char * args);
 #endif
 
-#if 0
+/*
 journal_superblock_t journal_super_block;
 ext3_inode           journal_inode;         ext2_super_block.s_journal_inum
 int                  journal_block_size_;   journal_super_block.s_blocksize
@@ -2454,4 +4045,235 @@ if (super_block.s_journal_dev) {
 	// Journal inode
 }
 journal_super_block.s_header.h_magic==JFS_MAGIC_NUMBER
-#endif // #if 0
+
+#define JFS_MAGIC_NUMBER 0xc03b3998U // The first 4 bytes of /dev/random!
+
+#define JFS_BT_DESCRIPTOR    1
+#define JFS_BT_COMMIT        2
+#define JFS_BT_SUPERBLOCK_V1 3
+#define JFS_BT_SUPERBLOCK_V2 4
+#define JFS_BT_REVOKE        5
+
+struct ext2_journal_descriptor_header { // journal_header_s == journal_header_t
+	u32 magic;
+	u32 blocktype; // JFS_BT_...
+	u32 sequence;
+};
+
+#define JFS_BTF_ESCAPE    1 // on-disk block is escaped
+#define JFS_BTF_SAME_UUID 2 // block has same uuid as previous
+#define JFS_BTF_DELETED   4 // block deleted by this transaction
+#define JFS_BTF_LAST_TAG  8 // last tag in this descriptor block
+
+struct journal_block_tag_s { // journal_block_tag_s == journal_block_tag_t
+	u32 blocknr;
+	u32 flags; // JFS_BTF_...
+};
+
+struct journal_revoke_header_s { // journal_revoke_header_s == journal_revoke_header_t
+	struct ext2_journal_descriptor_header header;
+	s32                                   count; // Number of bytes used in this block.
+};
+
+struct journal_superblock_s {
+/-* 0x000 *-/	struct ext2_journal_descriptor_header header;
+		// Static information describing the journal
+/-* 0x00c *-/	u32 cluster_size; // Journal device cluster size (in bytes)
+/-* 0x010 *-/	u32 max_len; // Total clusters in journal (file)
+/-* 0x014 *-/	u32 first; // First block of log information
+		// Dynamic information describing the current state of the log
+/-* 0x018 *-/	u32 sequence; // first commit ID expected in log
+/-* 0x01c *-/	u32 start; // cluster number of start of log
+/-* 0x020 *-/	u32 errno; // Error value, as set by journal_abort()
+		// Remaining fields are only valid in a version-2 superblock
+/-* 0x024 *-/	u32 feature_rwcompat; // rw compatible feature set
+/-* 0x028 *-/	u32 feature_incompat; // incompatible feature set
+/-* 0x02c *-/	u32 feature_rocompat; // ro compatible feature set
+/-* 0x030 *-/	u8  uuid[16]; // 128-bit uuid for journal
+/-* 0x040 *-/	u32 nr_users; // Number of file systems sharing this log
+/-* 0x044 *-/	u32 dynsuper; // Blocknr of dynamic superblock copy
+/-* 0x048 *-/	u32 max_transaction_j_size; // Limit of journal blocks per transaction
+/-* 0x04c *-/	u32 max_transaction_d_size; // Limit of data blocks per transaction
+/-* 0x050 *-/	u32 padding[44]; // Unused
+/-* 0x100 *-/	u8  users[16*48]; // UUID of every FS sharing this log (zero for internal journals)
+/-* 0x400 *-/
+};
+
+--- 0x00000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=4 (JFS_BT_SUPERBLOCK_V2)
+header.sequence=0
+cluster_size=2048
+max_len=2048
+first=1
+sequence=0x0008E1F5
+start=0
+errno=0
+feature_rwcompat=0
+feature_incompat=1 (JFS_FEATURE_INCOMPAT_REVOKE)
+feature_rocompat=0
+uuid[]={ 0xDA,0xBD,0x0F,0xA1, 0x50,0x0C,0x47,0xF2, 0xB8,0xF7,0x0A,0x33, 0x23,0x00,0x12,0x28 }
+nr_users=1
+dynsuper=0
+max_transaction_j_size=0
+max_transaction_d_size=0
+padding[]={ 0 }
+users[]={ 0 }
+--- 0x00800
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=1 (JFS_BT_DESCRIPTOR)
+header.sequence=0x0008E1E4
+x0c=0x000004BE
+x10=0
+x14=0
+x18=0
+x1c=0
+x20=0
+x24=0x2055C002
+x28=0x0000000A
+--- 0x01000
+[data]
+--- 0x01800
+[data]
+--- 0x02000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=2 (JFS_BT_COMMIT)
+header.sequence=0x0008E1E4
+--- 0x02800
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=1 (JFS_BT_DESCRIPTOR)
+header.sequence=0x0008E1E5
+x0c=0x2055C002
+x10=8
+--- 0x03000
+[data]
+--- 0x03800
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=2 (JFS_BT_COMMIT)
+header.sequence=0x0008E1E5
+--- 0x04000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=1 (JFS_BT_DESCRIPTOR)
+header.sequence=0x0008E1E6
+x0c=0x2055C002
+x10=8
+--- 0x04800
+[data]
+--- 0x05000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=2 (JFS_BT_COMMIT)
+header.sequence=0x0008E1E6
+--- 0x05800
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=1 (JFS_BT_DESCRIPTOR)
+header.sequence=0x0008E1E7
+x0c=0x20560002
+x10=0
+x14=0
+x18=0
+x1c=0
+x20=0
+x24=0x2BAA4000
+x28=0x00000002
+x2c=0x000002BB
+x30=0x00000002
+x34=0x2B15AE78
+x38=0x0000000A
+--- 0x06000
+[data]
+--- 0x06800
+[data] (?inode bitmap?)
+--- 0x07000
+[data] (?group descriptor table?)
+--- 0x07800
+[data] (?indirect block?)
+--- 0x08000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=2 (JFS_BT_COMMIT)
+header.sequence=0x0008E1E7
+--- 0x08800
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=1 (JFS_BT_DESCRIPTOR)
+header.sequence=0x0008E1E8
+x0c=0x2055C002
+x10=0
+x14=0
+x18=0
+x1c=0
+x20=0
+x24=0x20560002
+x28=0x0000000A
+--- 0x09000
+[data]
+--- 0x09800
+[data]
+--- 0x0a000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=2 (JFS_BT_COMMIT)
+header.sequence=0x0008E1E8
+--- 0x0a800
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=2 (JFS_BT_COMMIT)
+header.sequence=0x0008E1E9
+--- 0x0b000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=1 (JFS_BT_DESCRIPTOR)
+header.sequence=0x0008E1EA
+x0c=0x2055C002
+x10=8
+--- 0x0b800
+[data]
+--- 0x0c000
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=2 (JFS_BT_COMMIT)
+header.sequence=0x0008E1EA
+--- 0x0c800
+header.magic=0xc03b3998 (JFS_MAGIC_NUMBER)
+header.blocktype=1 (JFS_BT_DESCRIPTOR)
+header.sequence=0x0008E1EB
+37C54001
+00000000
+00000000
+00000000
+00000000
+00000000
+0000037D
+00000002
+37C54002
+00000002
+2055C002
+00000002
+2056000A
+00000002
+20560002
+00000002
+37C54000
+0000000A
+--- 0x0d000
+[data] (?cluster bitmap?)
+--- 0x0d800
+[data] (?group descriptor table?)
+--- 0x0e000
+[data]
+--- 0x0e800
+[data]
+--- 0x0f000
+[data] (directory contents)
+--- 0x0f800
+[data]
+--- 0x10000
+[data]
+--- 0x10800
+
+
+
+#define fv (j)->j_format_version
+#define jsb (j)->j_superblock
+#define JFS_HAS_RWCOMPAT_FEATURE(j,mask) (fv>=2 && (jsb->s_feature_rwcompat & cpu_to_be32((mask))))
+
+#define JFS_FEATURE_INCOMPAT_REVOKE 0x00000001
+
+#define JFS_KNOWN_RW_COMPAT_FEATURES 0
+#define JFS_KNOWN_RO_COMPAT_FEATURES 0
+#define JFS_KNOWN_IN_COMPAT_FEATURES JFS_FEATURE_INCOMPAT_REVOKE
+*/

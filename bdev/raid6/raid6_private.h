@@ -118,13 +118,14 @@ struct softraid_superblock_0_device_descriptor {
 
 #define MD_DISK_WRITEMOSTLY_SHIFT 9 // disk is "write-mostly" is RAID1 config. Read requests will only be sent here if needed
 
+#define MD_DISK_FAULTY      (1U<<MD_DISK_FAULTY_SHIFT)
+#define MD_DISK_ACTIVE      (1U<<MD_DISK_ACTIVE_SHIFT)
+#define MD_DISK_SYNC        (1U<<MD_DISK_SYNC_SHIFT)
+#define MD_DISK_REMOVED     (1U<<MD_DISK_REMOVED_SHIFT)
 
-#define MD_DISK_FAULTY      (1<<MD_DISK_FAULTY_SHIFT)
-#define MD_DISK_ACTIVE      (1<<MD_DISK_ACTIVE_SHIFT)
-#define MD_DISK_SYNC        (1<<MD_DISK_SYNC_SHIFT)
-#define MD_DISK_REMOVED     (1<<MD_DISK_REMOVED_SHIFT)
+#define MD_DISK_FAULTY_REMOVED (MD_DISK_FAULTY|MD_DISK_REMOVED)
 
-#define MD_DISK_WRITEMOSTLY (1<<MD_DISK_WRITEMOSTLY_SHIFT) // disk is "write-mostly" is RAID1 config. Read requests will only be sent here if needed
+#define MD_DISK_WRITEMOSTLY (1U<<MD_DISK_WRITEMOSTLY_SHIFT) // disk is "write-mostly" is RAID1 config. Read requests will only be sent here if needed
 
 /*
  * Superblock state bits

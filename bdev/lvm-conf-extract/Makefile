@@ -29,12 +29,13 @@ THISDIR  = bdev/lvm-conf-extract
 SRCS = \
 	lvm-conf-extract.c \
 
+LIBTARGET = lvm-conf-extract
 SOTARGET = lvm-conf-extract.so
-SOFLAGS += -lbdev
+# SOFLAGS += -L.. -lbdev
 
 CPPFLAGS += -I.. -I../..
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L..
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
 
 include $(shell btmakefile --path)/Makefile.Include
 

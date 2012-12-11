@@ -1,5 +1,6 @@
 #include "common.h"
 
+#include <btfileio.h>
 #include <ctype.h>
 #include <mprintf.h>
 #include <stdlib.h>
@@ -105,7 +106,8 @@ void print_progress_bar(struct progress_bar * progress_bar,unsigned long long nu
 		progress_bar->prev_time=curr_time;
 		char * t1;
 		char * t2;
-		eprintf(
+		fdprintf(
+			4,
 			"\033[K\r%s%*llu/%*llu (%s/~%s)\033[K\r\033[%uA"
 			,progress_bar->space
 			,progress_bar->format_size
@@ -124,21 +126,27 @@ void print_progress_bar(struct progress_bar * progress_bar,unsigned long long nu
 }
 
 void print_stalled_progress_bar(struct progress_bar * progress_bar,unsigned long long num) {
-	progress_bar->prev_time=bttime();
-	char * t2;
-	eprintf(
-		"\033[K\r%s%*llu/%*llu (stalled/~%s)\033[K\r\033[%uA"
-		,progress_bar->space
-		,progress_bar->format_size
-		,num
-		,progress_bar->format_size
-		,progress_bar->max
-		,(t2=mkhrtime((bttime_t)((
-			(progress_bar->prev_time-progress_bar->start_time)/1000000000.0*progress_bar->max
-		)/num)))?t2:"ENOMEM"
-		,progress_bar->lines+1
-	);
-	free(t2);
+	bttime_t curr_time=bttime();
+	
+	if (num==progress_bar->max || progress_bar->prev_time+333333333LLU<curr_time) {
+		progress_bar->prev_time=curr_time;
+		
+		char * t2;
+		fdprintf(
+			4,
+			"\033[K\r%s%*llu/%*llu (stalled/~%s)\033[K\r\033[%uA"
+			,progress_bar->space
+			,progress_bar->format_size
+			,num
+			,progress_bar->format_size
+			,progress_bar->max
+			,(t2=mkhrtime((bttime_t)((
+				(progress_bar->prev_time-progress_bar->start_time)/1000000000.0*progress_bar->max
+			)/num)))?t2:"ENOMEM"
+			,progress_bar->lines+1
+		);
+		free(t2);
+	}
 }
 
 void progress_bar_free(struct progress_bar * pb) {

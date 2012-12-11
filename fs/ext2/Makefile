@@ -33,6 +33,8 @@ SOTARGET = ext2.so
 # SOFLAGS += -L../../bdev -lbdev
 # -L.. -lfs
 
+SOFLAGS += -lz -lpthread
+
 CPPFLAGS-ext2.o += -I.. -I../.. -I../../bdev
 CPPFLAGS-ext2.s += -I.. -I../.. -I../../bdev
 CPPFLAGS-ext2.o += -DHAVE_LINUX_CLONE
@@ -45,8 +47,10 @@ CPPFLAGS-ext2.s += -DHAVE_LINUX_CLONE
 
 # PRINTFLAGS=true
 
-CPPFLAGS += -I$(TOPDIR)/btlib
-LDFLAGS += -L$(TOPDIR)/btlib -lbt -LBtLinuxLibrary -lBtLinuxLibrary
+CPPFLAGS += 
+# -I$(TOPDIR)/btlib
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+# -L$(TOPDIR)/btlib -lbt
 
 include $(shell btmakefile --path)/Makefile.Include
 

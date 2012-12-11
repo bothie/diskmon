@@ -29,12 +29,13 @@ THISDIR  = bdev/blindread
 SRCS = \
 	blindread.c \
 
+LIBTARGET = blindread
 SOTARGET = blindread.so
-SOFLAGS += -lbdev
+# SOFLAGS += -L.. -lbdev
 
 CPPFLAGS += -I.. -I../..
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L..
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
 
 include $(shell btmakefile --path)/Makefile.Include
 

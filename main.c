@@ -61,7 +61,7 @@ int main(int argc,char * argv[]) {
 //			printf("\t\t\tinit=%p\n",init);
 			if (!bdev_driver) {
 				eprintf(
-					"Loaded %s.so successfully, but it didn't register itself to the dev framework.\n"
+					"Loaded %s successfully, but it didn't register itself to the dev framework.\n"
 					,filename
 				);
 				exit(2);
@@ -89,6 +89,7 @@ int main(int argc,char * argv[]) {
 				"Device with name %s already registered"
 				,name
 			);
+			free(name);
 			exit(2);
 		}
 //		printf("\t\targ=\"%s\"\n",p);
@@ -111,6 +112,7 @@ int main(int argc,char * argv[]) {
 	void * ext2_driver=dlopen(filename,RTLD_NOW|RTLD_GLOBAL);
 	if (!ext2_driver) {
 		eprintf("Couldn't load %s",filename);
+		eprintf("dlerror: %s\n",dlerror());
 		exit(2);
 	}
 	
@@ -121,8 +123,8 @@ int main(int argc,char * argv[]) {
 		exit(2);
 	}
 	
-//	ext2_fsck("platz/home");
-//	ext2_fsck("root");
+	ext2_fsck("platz/home");
+	ext2_fsck("root");
 	ext2_fsck("aesraid5/home");
 	
 	exit(0);
@@ -222,7 +224,7 @@ int main(int argc,char * argv[]) {
 				,format_size
 				,(unsigned long long)(pos1-start_pos1)
 				,format_size
-				,(unsigned long long)(num_blocks)
+				,(unsigned long long)num_blocks
 				,t1=mkhrtime((curr_time-start_time)/1000000000)
 				,t2=mkhrtime(((curr_time-start_time)/1000000*(num_blocks)/(pos1-start_pos1))/1000)
 			);

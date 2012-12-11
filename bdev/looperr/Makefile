@@ -29,13 +29,16 @@ THISDIR  = bdev/looperr
 SRCS = \
 	looperr.c \
 
+LIBTARGET = looperr
 SOTARGET = looperr.so
 SOFLAGS += -L.. -lbdev
 
 CPPFLAGS-looperr.o += -I.. -I../..
 
-CPPFLAGS += -I$(TOPDIR)/btlib
-LDFLAGS += -L$(TOPDIR)/btlib -lbt -LBtLinuxLibrary -lBtLinuxLibrary
+CPPFLAGS += 
+# -I$(TOPDIR)/btlib
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+# -L$(TOPDIR)/btlib -lbt
 
 include $(shell btmakefile --path)/Makefile.Include
 

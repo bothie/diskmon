@@ -1,3 +1,5 @@
+// #define IGNORE_SUPERBLOCK_DIFFERENCES
+
 #include "raid6_private.h"
 
 #include "common.h"
@@ -28,6 +30,7 @@ bool raid6_verify_parity=true;
  * Indirect public interface (via struct dev)
  */
 static block_t raid6_read(void * _private,block_t first,block_t num,unsigned char * data);
+static block_t raid6_data_read(void * _private,block_t first,block_t num,u8 * data);
 static block_t raid6_write(void * _private,block_t first,block_t num,const unsigned char * data);
 static bool raid6_destroy(void * _private);
 
@@ -37,6 +40,7 @@ static bool raid6_component_destroy(void * _private);
 static block_t raid6_component_read(void * _private,block_t first,block_t num,unsigned char * data);
 
 static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * data,u8 * error_map);
+static block_t raid6_data_write(void * _private,block_t first,block_t num,const u8 * data);
 
 static bool initialized;
 
@@ -80,6 +84,7 @@ struct raid6_disk {
 		struct softraid_superblock_0 * v0;
 		struct softraid_superblock_1 * v1;
 	} sb;
+	bool silently_fix_next;
 };
 
 struct raid6_dev {
@@ -391,8 +396,8 @@ static int read_super_version_0(struct raid6_disk * disk,bool probing) {
 }
 
 bool debug_striped_reader=false;
-
-#define IGNORE_SUPERBLOCK_DIFFERENCES
+bool debug_data_reader=false;
+bool debug_data_writer=false;
 
 // <dev1> <dev2> <dev3> <dev4> [<dev5> [...]]
 //
@@ -404,6 +409,7 @@ static struct bdev * raid6_init(struct bdev_driver * bdev_driver,char * name,con
 	struct bdev * * components_bdev=NULL;
 	struct raid6_component_dev * * components=NULL;
 	bool write_super_block=false;
+	struct softraid_superblock_0 * v0=NULL;
 	
 	if (sizeof(struct softraid_superblock_0)!=4096) {
 		ERRORF("sizeof(struct softraid_superblock_0)=%u.",(unsigned)sizeof(struct softraid_superblock_0));
@@ -420,7 +426,7 @@ static struct bdev * raid6_init(struct bdev_driver * bdev_driver,char * name,con
 	unsigned long param_level;
 	unsigned long param_layout;
 	unsigned long param_chunk_size;
-	unsigned long param_role;
+	unsigned long param_role; // This field is needed when writing raid super blocks if there are missing disks.
 	bool param_valid=false;
 	
 	p=args;
@@ -454,6 +460,9 @@ no_params:
 	
 	p=args;
 	while (*p) {
+		if (*p=='-' && *(p+1)=='-') {
+			--private->num_disks;
+		}
 		while (*p && *p!=' ') ++p;
 		++private->num_disks;
 		while (*p && *p==' ') ++p;
@@ -489,7 +498,10 @@ restart:
 		unsigned md_disk_sync=0;
 		unsigned md_disk_removed=0;
 		unsigned md_disk_spare=0;
+		unsigned md_disk_faulty_removed=0;
+		private->disk[d].silently_fix_next=false;
 		
+parse_disk_device_name: ;
 		const char * start=p;
 		while (*p && *p!=' ') ++p;
 		
@@ -501,6 +513,19 @@ restart:
 		memcpy(disk_device_name,start,p-start);
 		disk_device_name[p-start]=0;
 		while (*p && *p==' ') ++p;
+		if (!strcmp(disk_device_name,"--silently-fix-next")) {
+			free(disk_device_name);
+			private->disk[d].silently_fix_next=true;
+			goto parse_disk_device_name;
+		}
+		if (*disk_device_name=='-' && *(disk_device_name+1)=='-') {
+			ERRORF(
+				"Unknown argument while parsing command line: %s"
+				,disk_device_name
+			);
+			free(disk_device_name);
+			goto err;
+		}
 //		eprintf("d=%u, args=»%s«, start=»%s«, p=»%s«, disk_device_name=»%s«\n",d,args,start,p,disk_device_name);
 		private->disk[d].bdev=bdev_lookup_bdev(disk_device_name);
 		if (!private->disk[d].bdev) {
@@ -521,72 +546,71 @@ restart:
 			}
 			private->disk[d].sb_offset=(bdev_get_size(private->disk[d].bdev)&~((u64)0x7f))-0x80;
 			private->disk[d].sb_version=0;
-			private->disk[d].sb.v0=malloc(4096); memset(private->disk[d].sb.v0,0,4096); // SIGSEGV if malloc failed
-			private->disk[d].sb.v0->magic=MD_MAGIC;
-			private->disk[d].sb.v0->major_version=0;
-			private->disk[d].sb.v0->minor_version=90;
-			private->disk[d].sb.v0->patch_version=0;
-			private->disk[d].sb.v0->gvalid_words=0; // Number of used words in this section (why is it 0?)
-			private->disk[d].sb.v0->sb0_level=private->level;
-			private->disk[d].sb.v0->sb0_size=private->disk[d].sb_offset/2;
-			private->disk[d].sb.v0->sb0_nr_disks=private->num_disks; // total disks in the raid set
-			private->disk[d].sb.v0->sb0_raid_disks=private->disk[d].sb.v0->sb0_nr_disks; // disks in a fully functional raid set
-			private->disk[d].sb.v0->md_minor=0; // Doesn't really matter ...
-			private->disk[d].sb.v0->not_persistent=0;
-			private->disk[d].sb.v0->state=(1<<MD_SB_CLEAN);
-			private->disk[d].sb.v0->active_disks=private->disk[d].sb.v0->sb0_nr_disks;
-			private->disk[d].sb.v0->working_disks=private->disk[d].sb.v0->sb0_nr_disks;
-			private->disk[d].sb.v0->failed_disks=0;
-			private->disk[d].sb.v0->spare_disks=0;
-			// private->disk[d].sb.v0->chksum will be initialized by write_super_version_0
-			private->disk[d].sb.v0->events=0;
-			private->disk[d].sb.v0->cp_events=0;
-			private->disk[d].sb.v0->recovery_cp=0;
+			if (!d) {
+				v0=malloc(4096); memset(v0,0,4096); // SIGSEGV if malloc failed
+				private->disk[d].sb.v0=NULL;
+			}
+			v0->magic=MD_MAGIC;
+			v0->major_version=0;
+			v0->minor_version=90;
+			v0->patch_version=0;
+			v0->gvalid_words=0; // Number of used words in this section (why is it 0?)
+			v0->sb0_level=private->level;
+			v0->sb0_size=private->disk[d].sb_offset/2;
+			v0->sb0_nr_disks=private->num_disks; // total disks in the raid set
+			v0->sb0_raid_disks=v0->sb0_nr_disks; // disks in a fully functional raid set
+			v0->md_minor=0; // Doesn't really matter ...
+			v0->not_persistent=0;
+			v0->state=(1<<MD_SB_CLEAN);
+			v0->active_disks=v0->sb0_nr_disks;
+			v0->working_disks=v0->sb0_nr_disks;
+			v0->failed_disks=0;
+			v0->spare_disks=0;
+			// v0->chksum will be initialized by write_super_version_0
+			v0->events=2;
+			v0->cp_events=2;
+			v0->recovery_cp=-1;
 			// Only valid for minor_version>90:
 			// reshape_position, new_level, delta_disks, new_layout, new_chunk
-				private->disk[d].sb.v0->reshape_position=0;
-				private->disk[d].sb.v0->new_level=0;
-				private->disk[d].sb.v0->delta_disks=0;
-				private->disk[d].sb.v0->new_layout=0;
-				private->disk[d].sb.v0->new_chunk=0;
-			private->disk[d].sb.v0->sb0_layout=private->layout;
-			private->disk[d].sb.v0->sb0_chunk_size=private->chunk_size_Bytes;
-			private->disk[d].sb.v0->root_pv=0; // What is this field for at all?
-			private->disk[d].sb.v0->root_block=0; // What is this field for at all?
+				v0->reshape_position=0;
+				v0->new_level=0;
+				v0->delta_disks=0;
+				v0->new_layout=0;
+				v0->new_chunk=0;
+			v0->sb0_layout=private->layout;
+			v0->sb0_chunk_size=private->chunk_size_Bytes;
+			v0->root_pv=0; // What is this field for at all?
+			v0->root_block=0; // What is this field for at all?
 			if (!d) {
-				private->disk[d].sb.v0->ctime=time(NULL);
+				v0->ctime=time(NULL);
 				int fd=open("/dev/random",O_RDONLY);
 				if (fd<0) {
 					eprintf("open(\"/dev/random\",O_RDONLY): %s\n",strerror(errno));
 					exit(2);
 				}
-				assert(2==read(fd,&private->disk[d].sb.v0->uuid0,2));
-				assert(2==read(fd,&private->disk[d].sb.v0->uuid1,2));
-				assert(2==read(fd,&private->disk[d].sb.v0->uuid2,2));
-				assert(2==read(fd,&private->disk[d].sb.v0->uuid3,2));
-			} else {
-				private->disk[d].sb.v0->ctime=private->disk[0].sb.v0->ctime;
-				private->disk[d].sb.v0->uuid0=private->disk[0].sb.v0->uuid0;
-				private->disk[d].sb.v0->uuid1=private->disk[0].sb.v0->uuid1;
-				private->disk[d].sb.v0->uuid2=private->disk[0].sb.v0->uuid2;
-				private->disk[d].sb.v0->uuid3=private->disk[0].sb.v0->uuid3;
+				assert(4==read(fd,&v0->uuid0,4));
+				assert(4==read(fd,&v0->uuid1,4));
+				assert(4==read(fd,&v0->uuid2,4));
+				assert(4==read(fd,&v0->uuid3,4));
+				for (unsigned i=0;i<private->num_disks;++i) {
+					v0->disks[i].number=i;
+					v0->disks[i].major=0;
+					v0->disks[i].minor=0;
+					v0->disks[i].raid_disk=i;
+					v0->disks[i].state=MD_DISK_ACTIVE|MD_DISK_SYNC;
+					eprintf("private->disk[d].sb.v0->disks[i].state=%lu\n",(unsigned long)v0->disks[i].state);
+				}
 			}
-			private->disk[d].sb.v0->utime=private->disk[d].sb.v0->ctime;
-			for (unsigned i=0;i<private->num_disks;++i) {
-				private->disk[d].sb.v0->disks[i].number=i;
-				private->disk[d].sb.v0->disks[i].major=0;
-				private->disk[d].sb.v0->disks[i].minor=0;
-				private->disk[d].sb.v0->disks[i].raid_disk=i;
-				private->disk[d].sb.v0->disks[i].state=MD_DISK_ACTIVE|MD_DISK_SYNC;
-				eprintf("private->disk[d].sb.v0->disks[i].state=%lu",(unsigned long)private->disk[d].sb.v0->disks[i].state);
-			}
+			v0->utime=v0->ctime;
 			memcpy(
-				&private->disk[d].sb.v0->this_disk,
-				&private->disk[d].sb.v0->disks[d],
-				sizeof(private->disk[d].sb.v0->this_disk)
+				&v0->this_disk,
+				&v0->disks[param_role],
+				sizeof(v0->this_disk)
 			);
+			private->disk[d].sb.v0=v0;
 			write_super_version_0(private->disk+d);
-			free(private->disk[d].sb.v0);
+			private->disk[d].sb.v0=NULL;
+//			free(v0);
 		}
 		private->disk[d].sb_version=-1;
 		if (!d) {
@@ -719,10 +743,13 @@ print_err:
 					if (unlikely(!s)) {
 						++md_disk_spare;
 					} else {
-						if (s&(1U<<MD_DISK_FAULTY_SHIFT )) ++md_disk_faulty ;
-						if (s&(1U<<MD_DISK_ACTIVE_SHIFT )) ++md_disk_active ;
-						if (s&(1U<<MD_DISK_SYNC_SHIFT   )) ++md_disk_sync   ;
-						if (s&(1U<<MD_DISK_REMOVED_SHIFT)) ++md_disk_removed;
+						if ((s&MD_DISK_FAULTY_REMOVED)==MD_DISK_FAULTY_REMOVED) {
+							++md_disk_faulty_removed;
+						}
+						if (s&MD_DISK_FAULTY ) ++md_disk_faulty ;
+						if (s&MD_DISK_ACTIVE ) ++md_disk_active ;
+						if (s&MD_DISK_SYNC   ) ++md_disk_sync   ;
+						if (s&MD_DISK_REMOVED) ++md_disk_removed;
 					}
 				}
 //				printf("}\n");
@@ -739,7 +766,7 @@ print_err:
 */
 				
 				// if (private->disk[d].sb.v0->patch_version==0) {
-					if (private->disk[d].sb.v0->sb0_nr_disks!=md_disk_active+(md_disk_faulty-md_disk_removed)+md_disk_spare) {
+					if (private->disk[d].sb.v0->sb0_nr_disks!=md_disk_active+(md_disk_faulty-md_disk_faulty_removed)+md_disk_spare) {
 						ERROR("nr_disks seems to be invalid (it's expected to be the sum of active, non-removed faulty and spare disks.");
 						goto print_err;
 					}
@@ -755,10 +782,18 @@ print_err:
 					goto print_err;
 				}
 				
-				if (private->disk[d].sb.v0->failed_disks!=md_disk_removed) {
-					ERROR("failed_disks seems to be invalid.");
+				/*
+				 * Sanity checking is cool - as long as one really understands, 
+				 * what what means. I don't (in this case) and the original soft 
+				 * raid programmers forgot to make suitable documentations. So 
+				 * I'll stick on just not checking the relationship of this 
+				 * values.
+				
+				if (private->disk[d].sb.v0->failed_disks!=md_disk_faulty-md_disk_faulty_removed) {
+					ERRORF("failed_disks seems to be invalid; private->disk[d].sb.v0->failed_disks=%lu, (md_disk_faulty=%u - md_disk_faulty_removed=%u)=%u.",private->disk[d].sb.v0->failed_disks,md_disk_faulty,md_disk_faulty_removed,md_disk_faulty-md_disk_faulty_removed);
 					goto print_err;
 				}
+				*/
 				
 				if (private->disk[d].sb.v0->spare_disks!=md_disk_spare) {
 					ERROR("spare_disks seems to be invalid.");
@@ -847,6 +882,7 @@ print_err:
 					}
 				} // switch (private->disk[0].sb_version)
 #ifndef IGNORE_SUPERBLOCK_DIFFERENCES
+				NOTIFYF("private->disk[0].sb.v0=%p, private->disk[d=%u].sb.v0=%p",(void*)private->disk[0].sb.v0,d,(void*)private->disk[d].sb.v0);
 				u32 sb0_csum=private->disk[0].sb.v0->chksum;
 				u32 sbd_csum=private->disk[d].sb.v0->chksum;
 				
@@ -890,6 +926,7 @@ print_err:
 							}
 							private->disk[0]=private->disk[d];
 							kick_disk=false;
+							d=0;
 						}
 					}
 				} // if (kick_disk)
@@ -942,31 +979,37 @@ print_err:
 			if (role>=private->num_disks) {
 				kick_disk=true;
 				NOTIFYF("Disk %s is a spare -> kicking out of the raid.",disk_device_name);
-			} else if (private->disk[role].layoutmapping!=-1) {
+			} else if (!kick_disk && private->disk[role].layoutmapping!=-1) {
 				ERRORF("(At least) two component disks claim having the same role (%s is one of them, %s is another one of them).",disk_device_name,bdev_get_name(private->disk[private->disk[role].layoutmapping].bdev));
 				goto err;
 			}
-			
-			if (!kick_disk) private->disk[role].layoutmapping=d;
 		} else { // if (!param_valid)
 			role=param_role++;
 		} // if (!param_valid), else
 		
-		char * tmp=mstrcpy("");
-		for (unsigned i=0;i<private->num_disks;++i) {
-			char * t;
-			if (i) {
-				t=tmp;
-				tmp=mprintf("%s, ",t);
-				free(t);
+		{
+			char * temp[2]={mstrcpy(""),mstrcpy("")};
+			for (int tempi=0;tempi<2;++tempi) {
+				for (unsigned i=0;i<private->num_disks;++i) {
+					char * t;
+					if (i) {
+						t=temp[tempi];
+						temp[tempi]=mprintf("%s, ",t);
+						free(t);
+					}
+					t=temp[tempi];
+					temp[tempi]=mprintf("%s%i",t,private->disk[i].layoutmapping);
+					free(t);
+				}
+				if (tempi) {
+					break;
+				}
+				if (!kick_disk) private->disk[role].layoutmapping=d;
 			}
-			t=tmp;
-			tmp=mprintf("%s%i",t,private->disk[i].layoutmapping);
-			free(t);
+			NOTIFYF("%s claims being role %u ( { %s } -> { %s } ).",disk_device_name,role,temp[0],temp[1]);
+			free(temp[0]);
+			free(temp[1]);
 		}
-		NOTIFYF("%s claims being role %u -> { %s }.",disk_device_name,role,tmp);
-		free(tmp);
-		private->disk[role].layoutmapping=d;
 		
 		if (kick_disk) {
 			NOTIFY("Kicking disk ...");
@@ -1000,10 +1043,16 @@ print_err:
 		}
 		
 		eprintf("private->disk[d=%u].sb_version=%u\n",d,private->disk[d].sb_version);
-		switch (private->disk[d].sb_version) {
-			case 0: free(private->disk[d].sb.v0); private->disk[d].sb.v0=NULL; break;
-			case 1: free(private->disk[d].sb.v1); private->disk[d].sb.v1=NULL; break;
+#ifndef IGNORE_SUPERBLOCK_DIFFERENCES
+		if (d) {
+#endif // #ifndef IGNORE_SUPERBLOCK_DIFFERENCES
+			switch (private->disk[d].sb_version) {
+				case 0: free(private->disk[d].sb.v0); private->disk[d].sb.v0=NULL; break;
+				case 1: free(private->disk[d].sb.v1); private->disk[d].sb.v1=NULL; break;
+			}
+#ifndef IGNORE_SUPERBLOCK_DIFFERENCES
 		}
+#endif // #ifndef IGNORE_SUPERBLOCK_DIFFERENCES
 		
 		if (!kick_disk) ++d;
 		
@@ -1011,6 +1060,12 @@ print_err:
 		free(disk_device_name);
 		disk_device_name=NULL;
 	} // while (*p)
+#ifndef IGNORE_SUPERBLOCK_DIFFERENCES
+	switch (private->disk[0].sb_version) {
+		case 0: free(private->disk[0].sb.v0); private->disk[0].sb.v0=NULL; break;
+		case 1: free(private->disk[0].sb.v1); private->disk[0].sb.v1=NULL; break;
+	}
+#endif // #ifndef IGNORE_SUPERBLOCK_DIFFERENCES
 	
 /*
 	for (unsigned i=0;i<private->num_disks;++i) {
@@ -1055,8 +1110,9 @@ print_err:
 	}
 	private->this=retval;
 	bdev_set_read_function(retval,raid6_read);
-	bdev_set_write_function(retval,raid6_write);
-	bdev_set_short_read_function(retval,raid6_short_read);
+//	bdev_set_read_function(retval,raid6_data_read);
+//	bdev_set_write_function(retval,raid6_data_write);
+//	bdev_set_short_read_function(retval,raid6_short_read);
 	private->refcount=1;
 	for (unsigned i=0;i<private->num_disks;++i) {
 		char * tmp;
@@ -1385,7 +1441,7 @@ static bool raid6_read_stripe(
 				1,
 				dataptrs[i]
 			)) {
-				NOTIFYF("%s: Couldn't read D%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
+				if (0) NOTIFYF("%s: Couldn't read D%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
 					,bdev_get_name(private->this)
 					,i
 					,bdev_get_name(component)
@@ -1424,7 +1480,7 @@ data_failed:
 				1,
 				dataptrs[d]
 			)) {
-				NOTIFYF("%s: Couldn't read P%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
+				if (0) NOTIFYF("%s: Couldn't read P%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
 					,bdev_get_name(private->this)
 					,i
 					,bdev_get_name(component)
@@ -1462,10 +1518,14 @@ parity_failed:
 	if (private->parity_disks!=2) nd++;
 //	eprintf("num_failed=%u\n",num_failed);
 	int runs=0;
+	bool silently=false;
 	
 retry_main_recovery:
 	assert(++runs<3);
 	if (num_failed) {
+/*
+		NOTIFY("Couldn't read all disks, recovering missing ones.");
+*/
 //		if (private->can_recover) {
 			ALGO.recover(nd,num_failed,failmap,block_size,dataptrs);
 /*		} else {
@@ -1475,6 +1535,11 @@ retry_main_recovery:
 		} */
 	}
 	if (verify_parity && num_failed!=private->parity_disks) {
+/*
+		if (num_failed) {
+			NOTIFY("Now rechecking parity bits.");
+		}
+*/
 		unsigned i,j,k,l;
 		u8 * testing_dataptrs[private->num_disks];
 		for (i=0;i<private->num_disks;++i) {
@@ -1492,7 +1557,66 @@ retry_main_recovery:
 				block_size
 			);
 		}
-		if (parity_mismatch) {
+		if (!parity_mismatch) {
+			if (num_failed) {
+/*
+				NOTIFY("No parity mismatch found (so, the reconstructed data is valid).");
+*/
+				/*
+				 * We physically couldn't read at least one disk, 
+				 * but we could recover it and we know, that the 
+				 * recovered data are clean.
+				 * So, we write it back to disk.
+				 */
+				for (unsigned f=0;f<num_failed;++f) {
+					unsigned d=failmap[f];
+					if (private->disk[mapping[d]].layoutmapping==-1) {
+						continue;
+					}
+					struct bdev * component=private->disk[private->disk[mapping[d]].layoutmapping].bdev;
+					unsigned i;
+					
+					if (d<private->data_disks) {
+						i=d;
+					} else {
+						i=d-private->data_disks;
+					}
+					
+					char * msg;
+					
+					if (1!=bdev_write(
+						component,
+						stripe+chunk*private->chunk_size_Blocks,
+						1,
+						dataptrs[d]
+					)) {
+						msg="%s: Couldn't write back recovered %c%u to component disk %s (role %u, column %u) at offset %llu (0x%llx)";
+						silently=false; // Never be silent on error
+					} else {
+						msg="%s: Recovered %c%u was written back to component disk %s (role %u, column %u) at offset %llu (0x%llx)";
+					}
+					
+					if (!silently) {
+						ERRORF(msg
+							,bdev_get_name(private->this)
+							,(d<private->data_disks)?'D':'P'
+							,i
+							,bdev_get_name(component)
+							,mapping[d]
+							,d
+							,(unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
+							,(unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
+						);
+					}
+				}
+			}
+		} else { // if (!parity_mismatch)
+			/*
+			 * Here, we don't know yet wether we are able to reconstruct (and hence can't check for silently_fix_next as well).
+			if (num_failed) {
+				NOTIFY("Ouch, parities don't match, so we can't trust the reconstructed data to be valid.");
+			}
+			*/
 			/*
 			 * We have at least one parity disk which contains 
 			 * other parities as the data disks suggest. So we 
@@ -1523,6 +1647,7 @@ retry_main_recovery:
 			char * first_solution_tmp=NULL;
 			unsigned first_solution_failmap[private->parity_disks];
 			unsigned char first_solution_data[private->parity_disks*block_size];
+//			eprintf("%s:%s:%i: silently := false\n",__FILE__,__FUNCTION__,__LINE__);
 			while (!first_solution_tmp && ++art_num_failed<(private->parity_disks-num_failed)) {
 //				eprintf("art_num_failed=%u\n",art_num_failed);
 				bool valid_permutation=true;
@@ -1582,16 +1707,26 @@ regen_permutation:
 						);
 					}
 					
-					char * tmp=mstrcpy("");
-					for (i=0;i<art_num_failed;++i) {
-						char * t=mprintf("%s%scolumn %u (role %u)",tmp,i?" ":"",art_failmap[i],mapping[art_failmap[i]]);
-						free(tmp);
-						tmp=t;
-					}
-					
 					if (!parity_mismatch) {
 						if (!num_solutions++) {
-							first_solution_tmp=tmp;
+							first_solution_tmp=mstrcpy("");
+							silently=true;
+//							eprintf("%s:%s:%i: silently := true\n",__FILE__,__FUNCTION__,__LINE__);
+							for (i=0;i<art_num_failed;++i) {
+								char * t=mprintf("%s%scolumn %u (role %u)",first_solution_tmp,i?" ":"",art_failmap[i],mapping[art_failmap[i]]);
+								free(first_solution_tmp);
+								first_solution_tmp=t;
+								if (!private->disk[mapping[art_failmap[i]]].silently_fix_next) {
+									eprintf(
+										"column %u (role %u) prevents from being silent\n"
+										,art_failmap[i]
+										,mapping[art_failmap[i]]
+									);
+//									eprintf("%s:%s:%i: silently := false\n",__FILE__,__FUNCTION__,__LINE__);
+									silently=false;
+								}
+							}
+							
 							memcpy(
 								first_solution_failmap
 								,art_failmap
@@ -1602,13 +1737,8 @@ regen_permutation:
 								,t_buffer
 								,art_num_failed*block_size
 							);
-							tmp=NULL;
 						}
-//					} else {
-//						NOTIFYF("Tested artificially kick %s.",tmp);
 					}
-					
-					free(tmp);
 					
 					for (i=art_num_failed;i--;) {
 						if (++art_failmap[i]<num_avail) {
@@ -1624,10 +1754,22 @@ regen_permutation:
 				}
 			}
 			if (first_solution_tmp) {
+//				eprintf("%s:%s:%i: silently == %s\n",__FILE__,__FUNCTION__,__LINE__,silently?"true":"false");
+				if (!silently) {
 //				if (art_num_failed!=1 
 //				||  mapping[avail[first_solution_failmap[0]]]!=4) {
-					NOTIFYF("raid6: Parity mismatch fixed by artificially kicking disks %s [art_num_failed=%u].",first_solution_tmp,art_num_failed);
-//				}
+					NOTIFYF(
+						"%s: Parity mismatch at stripe %llu of chunk %llu offset %llu [%llu..%llu] fixed by artificially kicking disks %s [art_num_failed=%u]."
+						,bdev_get_name(private->this)
+						,(unsigned long long)stripe
+						,(unsigned long long)chunk
+						,(unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
+						,(unsigned long long)(private->data_disks*( chunk   *private->chunk_size_Blocks)  )
+						,(unsigned long long)(private->data_disks*((chunk+1)*private->chunk_size_Blocks)-1)
+						,first_solution_tmp
+						,art_num_failed
+					);
+				}
 				
 				/*
 				 * We could recover a consistent view by kicking one or more disks but 
@@ -1705,14 +1847,70 @@ regen_permutation:
 				}
 				goto retry_main_recovery;
 			} else {
-				NOTIFY("raid6: Parity mismatch.");
+				NOTIFYF(
+					"%s: Parity mismatch at stripe %llu of chunk %llu offset %llu [%llu..%llu] WHICH COULDN'T BE FIXED."
+					,bdev_get_name(private->this)
+					,(unsigned long long)stripe
+					,(unsigned long long)chunk
+					,(unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
+					,(unsigned long long)(private->data_disks*(stripe+chunk*private->chunk_size_Blocks))
+					,(unsigned long long)(private->data_disks*(stripe+chunk*private->chunk_size_Blocks+1)-1)
+				);
+				/*
+				for (unsigned column=0;column<private->data_disks+private->parity_disks;++column) {
+					char * tmp=mprintf(
+						"/ramfs/stripes/c%llus%lluC%i.%c%i.read"
+						,(unsigned long long)chunk
+						,(unsigned long long)stripe
+						,column
+						,(column<private->data_disks)?'D':'P'
+						,(column<private->data_disks)?column:(column-private->data_disks)
+					);
+					int fd=open(tmp,O_CREAT|O_TRUNC|O_WRONLY,0666);
+					write(fd,dataptrs[column],512);
+					close(fd);
+					free(tmp);
+				}
+				*/
+#ifdef DON_T_UNCOMMENT_UNLESS_YOU_REALLY_KNOW_WHAT_YOU_ARE_DOING
+				/*
+				unsigned afm[2];
+				afm[0]=2;
+				afm[1]=3;
+				ALGO.recover(nd,2,afm,block_size,dataptrs);
+				for (unsigned column=0;column<private->data_disks+private->parity_disks;++column) {
+					char * tmp=mprintf(
+						"/ramfs/stripes/c%llus%lluC%i.%c%i.raf:D2,D3"
+						,(unsigned long long)chunk
+						,(unsigned long long)stripe
+						,column
+						,(column<private->data_disks)?'D':'P'
+						,(column<private->data_disks)?column:(column-private->data_disks)
+					);
+					int fd=open(tmp,O_CREAT|O_TRUNC|O_WRONLY,0666);
+					write(fd,dataptrs[column],512);
+					close(fd);
+					free(tmp);
+					if (column==2
+					||  column==3) {
+						struct bdev * component=private->disk[private->disk[mapping[column]].layoutmapping].bdev;
+						bdev_write(
+							component,
+							stripe+chunk*private->chunk_size_Blocks,
+							1,
+							dataptrs[column]
+						);
+					}
+				}
+				*/
+#endif // #ifdef DON_T_UNCOMMENT_UNLESS_YOU_REALLY_KNOW_WHAT_YOU_ARE_DOING
 			}
 			errno=ENOEXEC;
 			return false;
-		}
-	}
+		} // if (!parity_mismatch), else
+	} // if (verify_parity && num_failed!=private->parity_disks)
 	return true;
-}
+} // static bool raid6_read_stripe()
 
 static block_t raid6_component_read(void * _private,block_t first,block_t num,unsigned char * data) {
 	struct raid6_component_dev * real_private=(struct raid6_component_dev *)_private;
@@ -1776,6 +1974,7 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 	 *
 	 * Will have the following on-disk structure.
 	 *
+	 * Chunk 0:
 	 * Stripe  0: Q000 D000 D008 D016 P000 \
 	 * Stripe  1: Q001 D001 D009 D017 P001  |
 	 * Stripe  2: Q002 D002 D010 D018 P002  |
@@ -1785,6 +1984,7 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 	 * Stripe  6: Q006 D006 D014 D022 P006  |
 	 * Stripe  7: Q007 D007 D015 D023 P007 /
 	 *            ---- ---- ---- ---- ----
+	 * Chunk 1:
 	 * Stripe  8: D024 D032 D040 P008 Q008
 	 * Stripe  9: D025 D033 D041 P009 Q009
 	 * Stripe 10: D026 D034 D042 P010 Q010
@@ -1795,6 +1995,7 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 	 * Stripe 15: D031 D039 D047 P015 Q015
 	 * Stripe 16: D056 D064 P016 Q016 D048
 	 *            ---- ---- ---- ---- ----
+	 * Chunk 2:
 	 * Stripe 17: D057 D065 P017 Q017 D049
 	 * Stripe 18: D058 D066 P018 Q018 D050
 	 * Stripe 19: D059 D067 P019 Q019 D051
@@ -1803,18 +2004,21 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 	 * Stripe 22: D062 D070 P022 Q022 D054
 	 * Stripe 23: D063 D071 P023 Q023 D055
 	 *            ---- ---- ---- ---- ----
+	 * Chunk 3:
 	 * Stripe 24: D088 P024 Q024 D072 D080
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 * Stripe 31: D095 P031 Q031 D079 D087
 	 *            ---- ---- ---- ---- ----
+	 * Chunk 4:
 	 * Stripe 32: P032 Q032 D096 D104 D112
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 * Stripe 39: P039 Q039 D103 D111 D119
-	 *            ---- ---- ---- ---- ----
+	 *            ==== ==== ==== ==== ====
+	 * Chunk 5:
 	 * Stripe 40: Q040 D120 D128 D136 P040
 	 * ...
 	 */
@@ -1971,7 +2175,7 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 			if (!ok && (!error_map || errno!=ENOEXEC)) {
 				if (errno==ENOEXEC) errno=EIO;
 				if (0) eprintf(
-					"<< raid6_read(%p,%llu,%llu,%p) [FAILED(raid6_read_chunk)]\n"
+					"<< raid6_short_read(%p,%llu,%llu,%p) [FAILED(raid6_read_chunk)]\n"
 					,_private
 					,(unsigned long long)first
 					,(unsigned long long)(num+retval)
@@ -2184,7 +2388,7 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 #endif // #if 0
 	
 	if (0) eprintf(
-		"<< raid6_read(%p,%llu,%llu,%p)=%llu\n"
+		"<< raid6_short_read(%p,%llu,%llu,%p)=%llu\n"
 		,_private
 		,(unsigned long long)first
 		,(unsigned long long)num
@@ -2196,15 +2400,572 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 }
 
 static block_t raid6_write(void * _private,block_t first,block_t num,const unsigned char * data) {
+	return 0;
+//	return raid6_data_write(_private,first,num,data);
+}
+
+/*
+ * Simple function meant to ease recovery of a partly broken raid with many 
+ * known data by other sources.
+ * 
+ * This function reads the data colums without verifying the parities. It only 
+ * reads parity data to reconstruct data after a disk io error (or if the data 
+ * is missing).
+ */
+static block_t raid6_data_read(void * _private,block_t first,block_t num,u8 * data) {
 	struct raid6_dev * private=(struct raid6_dev *)_private;
+	if (debug_data_reader) eprintf(
+		"raid6_data_read(%p,%llu,%llu,%p)\n"
+		,_private
+		,(unsigned long long)first
+		,(unsigned long long)num
+		,data
+	);
 	
-	ignore(private);
-	ignore(first);
-	ignore(num);
-	ignore(data);
+	unsigned bs=bdev_get_block_size(private->disk[0].bdev);
 	
-	ERROR("raid6: Writing is not supported yet.\n");
+	block_t full_chunk_size_Blocks=private->data_disks*private->chunk_size_Blocks;
+	if (debug_data_reader) eprintf("\tfull_chunk_size_Blocks=%llu\n",(unsigned long long)full_chunk_size_Blocks);
 	
-	errno=ENOSYS;
-	return -1;
+	block_t frst_chunk,frst_full_chunk,frst_block_in_frst_chunk,frst_disk_in_frst_chunk,frst_stripe_in_frst_chunk; // ,frst_chunk_num_stripes;
+	block_t last_chunk,last_full_chunk,last_block_in_last_chunk,last_disk_in_last_chunk,last_stripe_in_last_chunk; // ,last_chunk_num_stripes;
+	
+	/*
+	 * First: Figure out which chunks contain the first/last block 
+	 * respectively.
+	 */
+	frst_chunk              =first/full_chunk_size_Blocks;
+	frst_block_in_frst_chunk=first%full_chunk_size_Blocks;
+	last_chunk              =(first+num-1)/full_chunk_size_Blocks;
+	last_block_in_last_chunk=(first+num-1)%full_chunk_size_Blocks;
+
+	if (debug_data_reader) eprintf(
+		"\tfrst_chunk=%llu\n"
+		"\tfrst_block_in_frst_chunk=%llu\n"
+		"\tlast_chunk=%llu\n"
+		"\tlast_block_in_last_chunk=%llu\n"
+		,(unsigned long long)frst_chunk
+		,(unsigned long long)frst_block_in_frst_chunk
+		,(unsigned long long)last_chunk
+		,(unsigned long long)last_block_in_last_chunk
+	);
+	
+	/*
+	 * Now figure out the disk ROLE which contains the first/last block 
+	 * respectively.
+	 */
+	frst_disk_in_frst_chunk=frst_block_in_frst_chunk/private->chunk_size_Blocks;
+	last_disk_in_last_chunk=last_block_in_last_chunk/private->chunk_size_Blocks;
+	
+	if (debug_data_reader) eprintf(
+		"\tfrst_disk_in_frst_chunk=%llu\n"
+		"\tlast_disk_in_last_chunk=%llu\n"
+		,(unsigned long long)frst_disk_in_frst_chunk
+		,(unsigned long long)last_disk_in_last_chunk
+	);
+	
+	/*
+	 * Finally figure out the first/last stripe needed. The previous 
+	 * values have been just straight forward, this ones are not (think 
+	 * about it yourself, it's hard to explain but quite logical).
+	 */
+	frst_stripe_in_frst_chunk=frst_block_in_frst_chunk%private->chunk_size_Blocks;
+	last_stripe_in_last_chunk=last_block_in_last_chunk%private->chunk_size_Blocks;
+	
+	if (debug_data_reader) eprintf(
+		"\tfrst_stripe_in_frst_chunk=%llu\n"
+		"\tlast_stripe_in_last_chunk=%llu\n"
+		,(unsigned long long)frst_stripe_in_frst_chunk
+		,(unsigned long long)last_stripe_in_last_chunk
+	);
+	
+	if (!frst_disk_in_frst_chunk
+	&&  !frst_stripe_in_frst_chunk) {
+		frst_full_chunk=frst_chunk;
+	} else {
+		frst_full_chunk=frst_chunk+1;
+	}
+	
+	if (last_disk_in_last_chunk  ==private->data_disks-1
+	&&  last_stripe_in_last_chunk==private->chunk_size_Blocks-1) {
+		last_full_chunk=last_chunk;
+	} else {
+		last_full_chunk=last_chunk-1;
+	}
+	
+	if (debug_data_reader) {
+		eprintf(
+			"\tfrst_full_chunk=%llu\n"
+			,(unsigned long long)frst_full_chunk
+		);
+		if (last_full_chunk==-1) {
+			eprintf(
+				"\tlast_full_chunk=-1\n"
+			);
+		} else {
+			eprintf(
+				"\tlast_full_chunk=%llu\n"
+				,(unsigned long long)last_full_chunk
+			);
+		}
+	}
+	
+	u8 d_buffer[private->num_disks*bs];
+	u8 p_buffer[                 2*bs];
+	u8 v_buffer[verify_parity  ? 2*bs: 1];
+	u8 t_buffer[verify_parity  ? 2*bs: 1];
+	
+	block_t frst_stripe,frst_disk;
+	unsigned num_disks,num_stripes,decrement_stripe;
+	
+	/*
+	if (debug_data_reader) eprintf(
+		"\t
+		=%llu\n"
+		"\t
+		=%llu\n"
+		,(unsigned long long)
+		,(unsigned long long)
+	);
+	*/
+	
+	block_t retval=0;
+	unsigned mapping[private->num_disks];
+	for (block_t chunk=frst_chunk;chunk<=last_chunk;++chunk) {
+		if (debug_data_reader) eprintf("\tchunk=%llu -> ",(unsigned long long)chunk);
+		if (chunk<frst_full_chunk) {
+			if (chunk>last_full_chunk) {
+				frst_stripe=frst_stripe_in_frst_chunk;
+				frst_disk=frst_disk_in_frst_chunk;
+				if (frst_disk!=last_disk_in_last_chunk) {
+					num_disks=last_disk_in_last_chunk-frst_disk;
+					num_stripes=1+last_stripe_in_last_chunk+private->chunk_size_Blocks-frst_stripe;
+					if (num_stripes>private->chunk_size_Blocks) {
+						if (debug_data_reader) eprintf("A");
+						num_stripes=private->chunk_size_Blocks;
+						++num_disks;
+					} else {
+						if (debug_data_reader) eprintf("B");
+					}
+					decrement_stripe=last_stripe_in_last_chunk;
+					if (frst_disk+1!=last_disk_in_last_chunk) {
+						if (debug_data_reader) eprintf("C: ");
+						num_stripes=8;
+					} else {
+						if (debug_data_reader) eprintf("D: ");
+					}
+				} else {
+					if (debug_data_reader) eprintf("E: ");
+					num_disks=1;
+					num_stripes=1+last_stripe_in_last_chunk-frst_stripe;
+					decrement_stripe=private->chunk_size_Blocks; // num_stripes;
+				}
+			} else {
+				frst_stripe=frst_stripe_in_frst_chunk;
+				frst_disk=frst_disk_in_frst_chunk;
+				if (frst_disk!=private->data_disks-1) {
+					if (debug_data_reader) eprintf("F: ");
+					num_stripes=private->chunk_size_Blocks;
+				} else {
+					if (debug_data_reader) eprintf("G: ");
+					num_stripes=private->chunk_size_Blocks-frst_stripe;
+				}
+				num_disks=private->data_disks-frst_disk;
+				decrement_stripe=private->chunk_size_Blocks-1;
+			}
+		} else {
+			if (chunk>last_full_chunk) {
+				frst_stripe=0;
+				frst_disk=0;
+				if (last_disk_in_last_chunk) {
+					if (debug_data_reader) eprintf("H: ");
+					num_stripes=private->chunk_size_Blocks;
+				} else {
+					if (debug_data_reader) eprintf("I: ");
+					num_stripes=1+last_stripe_in_last_chunk;
+				}
+				num_disks=1+last_disk_in_last_chunk;
+				decrement_stripe=last_stripe_in_last_chunk;
+			} else {
+				if (debug_data_reader) eprintf("J: ");
+				frst_stripe=0;
+				num_stripes=private->chunk_size_Blocks;
+				frst_disk=0;
+				num_disks=private->data_disks;
+				decrement_stripe=num_stripes; // Effectively deactivating this feature
+			}
+		}
+		if (debug_data_reader) eprintf(
+			"frst_stripe=%llu, num_stripes=%llu, decrement_stripe=%llu, frst_disk=%llu, num_disks=%llu\n"
+			,(long long unsigned)frst_stripe
+			,(long long unsigned)num_stripes
+			,(long long unsigned)decrement_stripe
+			,(long long unsigned)frst_disk
+			,(long long unsigned)num_disks
+		);
+		
+		raid6_get_role_mapping_for_chunk(private,chunk,mapping,NULL);
+		
+		block_t stripe=frst_stripe;
+		block_t retval_add=0;
+		for (block_t s=0;s<num_stripes;++s) {
+			if (debug_data_reader) eprintf("\t\ts=%llu (stripe=%llu)\n",(long long unsigned)s,(long long unsigned)stripe);
+			
+			unsigned disk=frst_disk;
+			for (unsigned d=0;d<num_disks;++d,++disk) {
+				block_t r;
+				size_t offset=bs*(retval+s+d*private->chunk_size_Blocks);
+				if (private->disk[mapping[disk]].layoutmapping==-1) {
+					r=0;
+				} else {
+					struct bdev * component=private->disk[private->disk[mapping[disk]].layoutmapping].bdev;
+					block_t block=chunk*private->chunk_size_Blocks+stripe;
+					if (debug_data_reader) eprintf(
+						"\t\t\t%s->read(1@%llu -> %p)"
+						,bdev_get_name(component)
+						,(unsigned long long)block
+						,data+offset
+					);
+					r=bdev_read(component,block,1,data+offset);
+				}
+				if (r==1) {
+					if (debug_data_reader) eprintf("=1\n");
+					/*
+					if (d==frst_disk) {
+						++retval_ok;
+					}
+					*/
+					++retval_add;
+				} else {
+					if (debug_data_reader && private->disk[mapping[disk]].layoutmapping!=-1) eprintf("=%lli\n",(unsigned long long)r);
+					bool ok=raid6_read_stripe(private,chunk,stripe,d_buffer,p_buffer,v_buffer,t_buffer);
+					if (!ok) {
+						if (errno==ENOEXEC) errno=EIO;
+						if (debug_data_reader) eprintf(
+							"<< raid6_data_read(%p,%llu,%llu,%p) [FAILED(raid6_read_stripe)]\n"
+							,_private
+							,(unsigned long long)first
+							,(unsigned long long)(num+retval)
+							,data
+						);
+						retval+=s;
+						if (!retval) {
+							if (debug_data_reader) eprintf(" -> returning -1\n");
+							return -1;
+						}
+						if (debug_data_reader) eprintf(" -> returning %llu\n",(unsigned long long)retval);
+						return retval;
+					}
+					
+//					disk=frst_disk;
+					/*
+					if (stripe<frst_stripe) {
+						++disk;
+					}
+					*/
+//					for (unsigned d=0;d<num_disks;++d,++disk) {
+						if (debug_data_reader) eprintf("\t\t\trecovered role %i d=%u (disk=%u) [src=x+bs*%u, dst=x+bs*%u]\n",mapping[disk],d,disk,(unsigned)disk,(unsigned)(retval+s+d*private->chunk_size_Blocks));
+//						size_t offset=bs*(retval+s+d*private->chunk_size_Blocks);
+						unsigned char * src=d_buffer+bs*disk;
+						memcpy(data+offset,src,bs);
+						/*
+						if (d==frst_disk) {
+							++retval_ok;
+						}
+						*/
+						++retval_add;
+//					}
+					
+//					break;
+				}
+			}
+			if (stripe==decrement_stripe) {
+				--num_disks;
+			}
+			if (++stripe==private->chunk_size_Blocks) {
+				stripe=0;
+				++frst_disk;
+			}
+		}
+		retval+=retval_add;
+	}
+	
+	if (debug_data_reader) eprintf(
+		"<< raid6_data_read(%p,%llu,%llu,%p)=%llu\n"
+		,_private
+		,(unsigned long long)first
+		,(unsigned long long)num
+		,data
+		,(unsigned long long)retval
+	);
+	
+	return retval;
+}
+
+/*
+ * Simple function meant to ease recovery of a partly broken raid with many 
+ * known data by other sources.
+ * 
+ * This function writes the data colums but doesn't touch the parities in the 
+ * process. So it is not senseful for normal disk operation.
+ */
+static block_t raid6_data_write(void * _private,block_t first,block_t num,const u8 * data) {
+	struct raid6_dev * private=(struct raid6_dev *)_private;
+	if (debug_data_writer) eprintf(
+		"raid6_data_write(%p,%llu,%llu,%p)\n"
+		,_private
+		,(unsigned long long)first
+		,(unsigned long long)num
+		,data
+	);
+	
+	unsigned bs=bdev_get_block_size(private->disk[0].bdev);
+	
+	block_t full_chunk_size_Blocks=private->data_disks*private->chunk_size_Blocks;
+	if (debug_data_writer) eprintf("\tfull_chunk_size_Blocks=%llu\n",(unsigned long long)full_chunk_size_Blocks);
+	
+	block_t frst_chunk,frst_full_chunk,frst_block_in_frst_chunk,frst_disk_in_frst_chunk,frst_stripe_in_frst_chunk; // ,frst_chunk_num_stripes;
+	block_t last_chunk,last_full_chunk,last_block_in_last_chunk,last_disk_in_last_chunk,last_stripe_in_last_chunk; // ,last_chunk_num_stripes;
+	
+	/*
+	 * First: Figure out which chunks contain the first/last block 
+	 * respectively.
+	 */
+	frst_chunk              =first/full_chunk_size_Blocks;
+	frst_block_in_frst_chunk=first%full_chunk_size_Blocks;
+	last_chunk              =(first+num-1)/full_chunk_size_Blocks;
+	last_block_in_last_chunk=(first+num-1)%full_chunk_size_Blocks;
+
+	if (debug_data_writer) eprintf(
+		"\tfrst_chunk=%llu\n"
+		"\tfrst_block_in_frst_chunk=%llu\n"
+		"\tlast_chunk=%llu\n"
+		"\tlast_block_in_last_chunk=%llu\n"
+		,(unsigned long long)frst_chunk
+		,(unsigned long long)frst_block_in_frst_chunk
+		,(unsigned long long)last_chunk
+		,(unsigned long long)last_block_in_last_chunk
+	);
+	
+	/*
+	 * Now figure out the disk ROLE which contains the first/last block 
+	 * respectively.
+	 */
+	frst_disk_in_frst_chunk=frst_block_in_frst_chunk/private->chunk_size_Blocks;
+	last_disk_in_last_chunk=last_block_in_last_chunk/private->chunk_size_Blocks;
+	
+	if (debug_data_writer) eprintf(
+		"\tfrst_disk_in_frst_chunk=%llu\n"
+		"\tlast_disk_in_last_chunk=%llu\n"
+		,(unsigned long long)frst_disk_in_frst_chunk
+		,(unsigned long long)last_disk_in_last_chunk
+	);
+	
+	/*
+	 * Finally figure out the first/last stripe needed. The previous 
+	 * values have been just straight forward, this ones are not (think 
+	 * about it yourself, it's hard to explain but quite logical).
+	 */
+	frst_stripe_in_frst_chunk=frst_block_in_frst_chunk%private->chunk_size_Blocks;
+	last_stripe_in_last_chunk=last_block_in_last_chunk%private->chunk_size_Blocks;
+	
+	if (debug_data_writer) eprintf(
+		"\tfrst_stripe_in_frst_chunk=%llu\n"
+		"\tlast_stripe_in_last_chunk=%llu\n"
+		,(unsigned long long)frst_stripe_in_frst_chunk
+		,(unsigned long long)last_stripe_in_last_chunk
+	);
+	
+	if (!frst_disk_in_frst_chunk
+	&&  !frst_stripe_in_frst_chunk) {
+		frst_full_chunk=frst_chunk;
+	} else {
+		frst_full_chunk=frst_chunk+1;
+	}
+	
+	if (last_disk_in_last_chunk  ==private->data_disks-1
+	&&  last_stripe_in_last_chunk==private->chunk_size_Blocks-1) {
+		last_full_chunk=last_chunk;
+	} else {
+		last_full_chunk=last_chunk-1;
+	}
+	
+	if (debug_data_writer) {
+		eprintf(
+			"\tfrst_full_chunk=%llu\n"
+			,(unsigned long long)frst_full_chunk
+		);
+		if (last_full_chunk==-1) {
+			eprintf(
+				"\tlast_full_chunk=-1\n"
+			);
+		} else {
+			eprintf(
+				"\tlast_full_chunk=%llu\n"
+				,(unsigned long long)last_full_chunk
+			);
+		}
+	}
+	
+	/*
+	u8 d_buffer[private->num_disks*bs];
+	u8 p_buffer[                 2*bs];
+	u8 v_buffer[verify_parity  ? 2*bs: 1];
+	u8 t_buffer[verify_parity  ? 2*bs: 1];
+	*/
+	
+	block_t frst_stripe,frst_disk;
+	unsigned num_disks,num_stripes,decrement_stripe;
+	
+	/*
+	if (debug_data_writer) eprintf(
+		"\t
+		=%llu\n"
+		"\t
+		=%llu\n"
+		,(unsigned long long)
+		,(unsigned long long)
+	);
+	*/
+	
+	block_t retval=0;
+	unsigned mapping[private->num_disks];
+	for (block_t chunk=frst_chunk;chunk<=last_chunk;++chunk) {
+		if (debug_data_writer) eprintf("\tchunk=%llu -> ",(unsigned long long)chunk);
+		if (chunk<frst_full_chunk) {
+			if (chunk>last_full_chunk) {
+				frst_stripe=frst_stripe_in_frst_chunk;
+				frst_disk=frst_disk_in_frst_chunk;
+				if (frst_disk!=last_disk_in_last_chunk) {
+					num_disks=last_disk_in_last_chunk-frst_disk;
+					num_stripes=1+last_stripe_in_last_chunk+private->chunk_size_Blocks-frst_stripe;
+					if (num_stripes>private->chunk_size_Blocks) {
+						if (debug_data_writer) eprintf("A");
+						num_stripes=private->chunk_size_Blocks;
+						++num_disks;
+					} else {
+						if (debug_data_writer) eprintf("B");
+					}
+					decrement_stripe=last_stripe_in_last_chunk;
+					if (frst_disk+1!=last_disk_in_last_chunk) {
+						if (debug_data_writer) eprintf("C: ");
+						num_stripes=8;
+					} else {
+						if (debug_data_writer) eprintf("D: ");
+					}
+				} else {
+					if (debug_data_writer) eprintf("E: ");
+					num_disks=1;
+					num_stripes=1+last_stripe_in_last_chunk-frst_stripe;
+					decrement_stripe=private->chunk_size_Blocks; // num_stripes;
+				}
+			} else {
+				frst_stripe=frst_stripe_in_frst_chunk;
+				frst_disk=frst_disk_in_frst_chunk;
+				if (frst_disk!=private->data_disks-1) {
+					if (debug_data_writer) eprintf("F: ");
+					num_stripes=private->chunk_size_Blocks;
+				} else {
+					if (debug_data_writer) eprintf("G: ");
+					num_stripes=private->chunk_size_Blocks-frst_stripe;
+				}
+				num_disks=private->data_disks-frst_disk;
+				decrement_stripe=private->chunk_size_Blocks-1;
+			}
+		} else {
+			if (chunk>last_full_chunk) {
+				frst_stripe=0;
+				frst_disk=0;
+				if (last_disk_in_last_chunk) {
+					if (debug_data_writer) eprintf("H: ");
+					num_stripes=private->chunk_size_Blocks;
+				} else {
+					if (debug_data_writer) eprintf("I: ");
+					num_stripes=1+last_stripe_in_last_chunk;
+				}
+				num_disks=1+last_disk_in_last_chunk;
+				decrement_stripe=last_stripe_in_last_chunk;
+			} else {
+				if (debug_data_writer) eprintf("J: ");
+				frst_stripe=0;
+				num_stripes=private->chunk_size_Blocks;
+				frst_disk=0;
+				num_disks=private->data_disks;
+				decrement_stripe=num_stripes; // Effectively deactivating this feature
+			}
+		}
+		if (debug_data_writer) eprintf(
+			"frst_stripe=%llu, num_stripes=%llu, decrement_stripe=%llu, frst_disk=%llu, num_disks=%llu\n"
+			,(long long unsigned)frst_stripe
+			,(long long unsigned)num_stripes
+			,(long long unsigned)decrement_stripe
+			,(long long unsigned)frst_disk
+			,(long long unsigned)num_disks
+		);
+		
+		raid6_get_role_mapping_for_chunk(private,chunk,mapping,NULL);
+		
+		block_t stripe=frst_stripe;
+		block_t retval_add=0;
+		for (block_t s=0;s<num_stripes;++s) {
+			if (debug_data_writer) eprintf("\t\ts=%llu (stripe=%llu)\n",(long long unsigned)s,(long long unsigned)stripe);
+			
+			unsigned disk=frst_disk;
+			for (unsigned d=0;d<num_disks;++d,++disk) {
+				block_t w;
+				size_t offset=bs*(retval+s+d*private->chunk_size_Blocks);
+				struct bdev * component;
+				if (private->disk[mapping[disk]].layoutmapping==-1) {
+					component=NULL;
+					w=0;
+				} else {
+					component=private->disk[private->disk[mapping[disk]].layoutmapping].bdev;
+					block_t block=chunk*private->chunk_size_Blocks+stripe;
+					if (debug_data_writer) eprintf(
+						"\t\t\t%s->write(1@%llu -> %p)"
+						,bdev_get_name(component)
+						,(unsigned long long)block
+						,data+offset
+					);
+					w=bdev_write(component,block,1,data+offset);
+				}
+				if (w==1) {
+					if (debug_data_writer) eprintf("=1\n");
+					/*
+					if (d==frst_disk) {
+						++retval_ok;
+					}
+					*/
+					++retval_add;
+				} else {
+					if (debug_data_writer && private->disk[mapping[disk]].layoutmapping!=-1) eprintf("=%lli\n",(unsigned long long)w);
+					ERRORF("%s: Couldn't data_write on columns %i role %i (disk %s)"
+						,bdev_get_name(private->this)
+						,disk
+						,mapping[disk]
+						,bdev_get_name(component)
+					);
+				}
+			}
+			if (stripe==decrement_stripe) {
+				--num_disks;
+			}
+			if (++stripe==private->chunk_size_Blocks) {
+				stripe=0;
+				++frst_disk;
+			}
+		}
+		retval+=retval_add;
+	}
+	
+	if (debug_data_writer) eprintf(
+		"<< raid6_data_writer(%p,%llu,%llu,%p)=%llu\n"
+		,_private
+		,(unsigned long long)first
+		,(unsigned long long)num
+		,data
+		,(unsigned long long)retval
+	);
+	
+	return retval;
 }

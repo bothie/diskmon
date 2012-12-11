@@ -233,14 +233,16 @@ struct crypt_alg * get_crypt_alg(const char * name) {
 struct bdev * dmcrypt_init(struct bdev_driver * bdev_driver,char * name,const char * args) {
 	ignore(bdev_driver);
 	
-// #define DEBUG
+// #define DEBUGGING
 	
 	// Zu Testzwecken platt durchmarschieren:
 	
-#ifdef DEBUG
+#ifdef DEBUGGING
 #define KEY_FILE "chkraid.key"
+#warning +DEBUGGING
 #else
 #define KEY_FILE "/ramfs/aesraid.key"
+#warning -DEBUGGING
 #endif
 	int fd=open(KEY_FILE,O_RDONLY);
 	if (fd<0) {
@@ -259,7 +261,7 @@ struct bdev * dmcrypt_init(struct bdev_driver * bdev_driver,char * name,const ch
 	passphrase[1]=':';
 	passphrase[0]=strlen(args)?args[strlen(args)-1]:' ';
 	passphrase[32]=0;
-#ifdef DEBUG
+#ifdef DEBUGGING
 	printf("key =");
 	for (int i=0;i<passphrase_len+2;++i) {
 		printf(" %02x",passphrase[i]);
@@ -438,9 +440,17 @@ static block_t dmcrypt_read(void * _private,block_t first,block_t num,unsigned c
 	block_t n=num;
 	
 	while (n--) {
+#ifdef VERIFY_ENCRYPTION
 		unsigned char undecrypted[512];
 		
 		memcpy(undecrypted,data,512);
+		
+		eprintf("UD:");
+		for (size_t i=0;i<16;++i) {
+			eprintf(" %02x",(unsigned)undecrypted[i]);
+		}
+		eprintf("\n");
+#endif // #ifdef VERIFY_ENCRYPTION
 		
 /*
 		printf(
@@ -453,16 +463,30 @@ static block_t dmcrypt_read(void * _private,block_t first,block_t num,unsigned c
 			return -1;
 		}
 		
+#ifdef VERIFY_ENCRYPTION
 		unsigned char reencrypted[512];
+		
+		eprintf("DE:");
+		for (size_t i=0;i<16;++i) {
+			eprintf(" %02x",(unsigned)data[i]);
+		}
+		eprintf("\n");
 		
 		memcpy(reencrypted,data,512);
 		
 		dmcrypt_encrypt_block(first,reencrypted,dev->key,dev->iv);
 		
+		eprintf("RE:");
+		for (size_t i=0;i<16;++i) {
+			eprintf(" %02x",(unsigned)reencrypted[i]);
+		}
+		eprintf("\n");
+		
 		if (memcmp(undecrypted,reencrypted,512)) {
 			ERROR("dmcrypt_read: undecrypted!=reencrypted");
 			abort();
 		}
+#endif // #ifdef VERIFY_ENCRYPTION
 		
 /*
 		struct crypt_alg_ctx * ctx=dev->key->makectx(dev->key);
@@ -523,6 +547,8 @@ static unsigned int cbc_process_encrypt(const struct cipher_desc *desc,
 }
 */
 
+/*
+ * BROKEN:
 block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned char * data) {
 	struct dmcrypt_bdev * dev=(struct dmcrypt_bdev *)_private;
 	
@@ -534,7 +560,11 @@ block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned c
 		return -1;
 	}
 	
+	unsigned char * eptr=encrypted;
 	while (n) {
+		dmcrypt_encrypt_block(first,reencrypted,dev->key,dev->iv);
+		
+		// dmcrypt_encrypt_block(first,reencrypted,dev->key,dev->iv);
 		struct crypt_alg_ctx * ctx=dev->key->makectx(dev->key);
 		if (!ctx) {
 			ERROR("Couldn't create cipher ctx.");
@@ -543,8 +573,9 @@ block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned c
 		
 //		dev->iv->use(ctx,f);
 		for (int i=512/ctx->key->alg->block_size;i--;) {
-			ctx->encrypt(ctx,data,encrypted);
+			ctx->encrypt(ctx,data,eptr);
 			data+=ctx->key->alg->block_size;
+			eptr+=ctx->key->alg->block_size;
 		}
 		ctx->killctx(ctx);
 		++f;
@@ -556,6 +587,95 @@ block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned c
 	free(encrypted);
 	
 	return retval;
+}
+*/
+
+static block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned char * data) {
+	struct dmcrypt_bdev * dev=(struct dmcrypt_bdev *)_private;
+	
+	block_t n=num;
+	
+	while (n--) {
+#ifdef VERIFY_ENCRYPTION
+		unsigned char unencrypted[512];
+		
+		memcpy(unencrypted,data,512);
+		
+		eprintf("UE:");
+		for (size_t i=0;i<16;++i) {
+			eprintf(" %02x",(unsigned)unencrypted[i]);
+		}
+		eprintf("\n");
+#endif // #ifdef VERIFY_ENCRYPTION
+		
+/*
+		printf(
+			"decrypt(%llu,%p,key,iv)\n"
+			,(unsigned long long)first
+			,data
+		);
+*/
+		if (!dmcrypt_encrypt_block(first,data,dev->key,dev->iv)) {
+			return -1;
+		}
+		
+#ifdef VERIFY_ENCRYPTION
+		unsigned char redecrypted[512];
+		
+		eprintf("EN:");
+		for (size_t i=0;i<16;++i) {
+			eprintf(" %02x",(unsigned)data[i]);
+		}
+		eprintf("\n");
+		
+		memcpy(redecrypted,data,512);
+		
+		dmcrypt_decrypt_block(first,redecrypted,dev->key,dev->iv);
+		
+		eprintf("RD:");
+		for (size_t i=0;i<16;++i) {
+			eprintf(" %02x",(unsigned)redecrypted[i]);
+		}
+		eprintf("\n");
+		
+		if (memcmp(unencrypted,redecrypted,512)) {
+			ERROR("dmcrypt_write: unencrypted!=redecrypted");
+			abort();
+		}
+#endif // #ifdef VERIFY_ENCRYPTION
+		
+/*
+		struct crypt_alg_ctx * ctx=dev->key->makectx(dev->key);
+		if (!ctx) {
+			ERROR("Couldn't create cipher ctx.");
+			return -1;
+		}
+		
+		unsigned bs=ctx->key->alg->block_size;
+		assert(bs == dev->iv->iv_size);
+		u32 iv[bs/4];
+		// dev->iv->use(ctx,first);
+		dev->iv->generate(iv,first);
+		u32 tmp[bs/4];
+		for (int i=512/bs;i--;) {
+			ctx->decrypt(ctx,data,tmp);
+			for (int j=0;j<4;++j) {
+				tmp[j]^=iv[j];
+				iv[j]=((u32*)data)[j];
+				((u32*)data)[j]=tmp[j];
+			}
+			data+=bs;
+		}
+		ctx->killctx(ctx);
+*/
+		data+=512;
+		++first;
+	}
+	
+	data-=512*num;
+	first-=num;
+	
+	return bdev_write(dev->backing_dev,first+1,num,data);
 }
 
 bool dmcrypt_destroy(void * _private) {

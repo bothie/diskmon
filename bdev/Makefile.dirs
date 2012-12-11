@@ -30,6 +30,7 @@ DIRS = \
 	blindread \
 	dc \
 	dmcrypt \
+	dump \
 	loop \
 	looperr \
 	lvm \

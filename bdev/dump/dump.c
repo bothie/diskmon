@@ -3,16 +3,17 @@
 
 #include <assert.h>
 #include <btmacros.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <mprintf.h>
 #include <parseutil.h>
+#include <signal.h>
 #include <stdbool.h>
-#include <stddbg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#define DRIVER_NAME "blindread"
+#define DRIVER_NAME "dump"
 
 /*
  * Public interface
@@ -41,6 +42,22 @@ BDEV_FINI {
 	}
 }
 
+block_t my_bdev_read(struct bdev * dev,block_t first,block_t num,unsigned char * data) {
+	return bdev_read(dev,first,num,data);
+}
+
+block_t my_bdev_write(struct bdev * dev,block_t first,block_t num,unsigned char * data) {
+	return bdev_write(dev,first,num,data);
+}
+
+ssize_t my_posix_read(int fd,void * buf,size_t count) {
+	return read(fd,buf,count);
+}
+
+ssize_t my_posix_write(int fd,void * buf,size_t count) {
+	return write(fd,buf,count);
+}
+
 /*
  * Implementation - everything non-public (except for init of course).
  */
@@ -49,6 +66,12 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 	ignore(name);
 	block_t addr=0;
 	block_t size=0;
+	
+	block_t (*bdev_rw)(struct bdev * dev,block_t first,block_t num,unsigned char * data)=NULL;
+	ssize_t (*posix_rw)(int fd,void * buf,size_t count)=NULL;
+	bool dumping_to_file;
+	int fd=-1;
+	
 	struct bdev * bdev;
 	{
 		char * dev_name;
@@ -59,27 +82,37 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 			cp=args;
 			unsigned long long _size;
 			if (':'==parse_unsigned_long_long(&cp,&_size)) {
-				args=cp+1;
+				++cp;
 				have_size=true;
-				parse_skip(&cp,':');
 			}
 			size=_size;
-		}
-		
-		{
-			cp=args;
+			
 			char c=parse_string(&cp,"@",NULL,NULL,&dev_name);
-			eprintf("dev_name=»%s«\n",dev_name);
-//			cp="test@123";
-//			c=parse_string(&cp,"@",NULL,NULL,&dev_name);
-//			eprintf("dev_name=»%s«\n",dev_name);
 			if (c=='@') {
 				unsigned long long _addr;
 				c=parse_unsigned_long_long(&cp,&_addr);
 				addr=_addr;
 			}
+			if (c=='<' || c=='>') {
+				++cp; // skip '<' or '>'
+				int posix_flags;
+				switch (c) {
+					case '>': { bdev_rw=my_bdev_read; posix_rw=my_posix_write; dumping_to_file=true; posix_flags=O_WRONLY|O_CREAT|O_TRUNC; break; }
+					case '<': { bdev_rw=my_bdev_write; posix_rw=my_posix_read; dumping_to_file=false; posix_flags=O_RDONLY; break; }
+					default: assert(never_reached); raise(SIGKILL);
+				}
+				fd=open(cp,posix_flags,0600);
+				if (fd<0) {
+					ERRORF("Couldn't open file %s: %s",cp,strerror(errno));
+					free(dev_name);
+					return NULL;
+				}
+				c=0;
+			} else {
+				c=1;
+			}
 			if (c) {
-				ERRORF("Couldn't parse argument »%s«, must be of form [size:]devname[@offset], c='%c' (%u), cp=%p, args=%p\n",args,c,(unsigned)(unsigned char)c,cp,args);
+				ERRORF("Couldn't parse argument »%s«, must be of form [size:]devname[@offset]{>|<}filename\n",args);
 				free(dev_name);
 				return NULL;
 			}
@@ -155,10 +188,50 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 			}
 		}
 		if (!memory) {
+			ssize_t l=chunk_size*bdev_get_block_size(bdev);
 			if (!buffer) {
-				buffer=malloc(chunk_size*bdev_get_block_size(bdev));
+				buffer=malloc(l);
 			}
-			block_t r=bdev_read(bdev,addr,chunk_size,buffer);
+			if (!dumping_to_file) {
+				ssize_t r=posix_rw(fd,buffer,l);
+				if (r%bdev_get_block_size(bdev)==0) {
+					chunk_size=r/bdev_get_block_size(bdev);
+					if (!chunk_size) break;
+				} else {
+					ERRORF(
+						"%s: Couldn't read from file\n"
+						,bdev_get_name(bdev)
+					);
+					break;
+				}
+			}
+			/*
+			eprintf(
+				"bdev_rw[%s](bdev,%llu,%llu,%p)\n"
+				,(bdev_rw==my_bdev_read)?"read":((bdev_rw==my_bdev_write)?"write":"???")
+				,(unsigned long long)addr
+				,(unsigned long long)chunk_size
+				,(void *)buffer
+			);
+			*/
+			block_t r=bdev_rw(bdev,addr,chunk_size,buffer);
+			if (dumping_to_file) {
+				if (r!=chunk_size) {
+					ERRORF(
+						"%s: Couldn't read from block device for writing to file"
+						,bdev_get_name(bdev)
+					);
+					break;
+				}
+				ssize_t w=posix_rw(fd,buffer,r*bdev_get_block_size(bdev));
+				if (w!=l) {
+					ERRORF(
+						"%s: Couldn't write to file\n"
+						,bdev_get_name(bdev)
+					);
+					break;
+				}
+			}
 			if (r!=(block_t)-1) {
 				/* Uncomment only for debugging!
 #warning WRITE CODE IN blindread IS ACTIVATED. DO NOT USE THIS IN PRODUCTIVE ENVIRONMENTS.
@@ -202,7 +275,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 			prev_time=curr_time;
 			char * t1;
 			char * t2;
-			bprintf(
+			eprintf(
 				"%s: %*llu/%*llu (%s/~%s)\r"
 				,bdev_get_name(bdev)
 				,format_size
@@ -223,5 +296,6 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		NOTIFYF("Blindread completed for %s without any errors ;-)",bdev_get_name(bdev));
 	}
 	free(buffer);
+	close(fd);
 	return (struct bdev *)0xdeadbeef;
 }

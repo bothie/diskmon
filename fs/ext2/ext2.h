@@ -1,5 +1,7 @@
 #include <bttypes.h>
 
+#define MAX_SIZE_FAST_SYMBOLIC_LINK 60
+
 /*
  * On-Disk structure of the super block
  */
@@ -99,6 +101,11 @@ struct super_block {
 	 * the file system's on disk structures, how the operation 
 	 * system handles devices. It's the task of the OS to hand over 
 	 * the device containing the journal to the file system driver.
+	 *
+	 * On the other hand, this field is only meant as a hint for the file 
+	 * system driver, which device to open for the journal. The journal 
+	 * has to be identified by the field journal_uuid which must be 
+	 * identical to the journal's uuid field.
 	 */
 /*0E4*/	u32  journal_dev;
 	
