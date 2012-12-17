@@ -1,3 +1,5 @@
+#define NEED_LONG_LONG
+
 #include <bttypes.h>
 
 #define MAX_SIZE_FAST_SYMBOLIC_LINK 60
@@ -29,8 +31,8 @@ struct super_block {
 	u32  checkinterval;                       // max. time between checks
 	u32  creator_os;                          // OS
 	u32  rev_level;                           // Revision level
-	// 0 means 128 byte inodes and 10 reserved inodes (1..10)
-	// 1 means dynamic inode size (see field inode_size) and an arbitrary number of reserved inodes (see first_inode).
+	// 0 means 128 byte inodes and 10 reserved inodes (1..10), no compat fields
+	// 1 means dynamic inode size (see field inode_size) and an arbitrary number of reserved inodes (see first_inode) and compat fields
 /*050*/	u16  reserved_access_uid;                 // Default uid for reserved blocks
 	u16  reserved_access_gid;                 // Default gid for reserved blocks
 	/*
@@ -108,15 +110,50 @@ struct super_block {
 	 * identical to the journal's uuid field.
 	 */
 /*0E4*/	u32  journal_dev;
-	
 /*0E8*/	u32  last_orphanded_inode;                // start of list of inodes to delete
 /*0EC*/	u32  hash_seed[4];                        // HTREE hash seed
 /*0FC*/	u8   def_hash_version;                    // Default hash version to use
-/*0FD*/	u8   reserved_char_pad;
-/*0FE*/	u16  reserved_word_pad;
+/*0FD*/	u8   jnl_backup_type;
+/*0FE*/	u16  group_descriptor_table_entry_size;
 /*100*/	u32  default_mount_opts;
 /*104*/	u32  first_meta_bg;                       // First metablock block group
-/*108*/	u32  reserved[62];                        // Padding to the end of the block
+/*108*/	u32  mkfs_time;
+/*10C*/	u32  jnl_blocks[17];
+/*150*/	u32  blocks_count_hi;
+/*154*/	u32  r_blocks_count_hi;
+/*158*/	u32  free_blocks_count_hi;
+/*15C*/	u16  min_extra_isize;
+/*15E*/	u16  want_extra_isize;
+/*160*/	u32  flags;
+/*164*/	u16  raid_stride;
+/*166*/	u16  mmp_update_interval;
+/*168*/	u64  mmp_block;
+/*170*/	u32  raid_stripe_width;
+/*174*/	u8   log_groups_per_flex;
+/*175*/	u8   checksum_type;
+/*176*/	u16  reserved_pad;
+/*178*/	u64  kbytes_written;
+/*180*/	u32  snapshot_inum;
+/*184*/	u32  snapshot_id;
+/*188*/	u64  snapshot_r_blocks_count;
+/*190*/	u32  snapshot_list;
+/*194*/	u32  error_count;
+/*198*/	u32  first_error_time;
+/*19C*/	u32  first_error_ino;
+/*1A0*/	u64  first_error_block;
+/*1A8*/	u8   first_error_func[32];
+/*1C8*/	u32  first_error_line;
+/*1CC*/	u32  last_error_time;
+/*1D0*/	u32  last_error_ino;
+/*1D4*/	u32  last_error_line;
+/*1D8*/	u64  last_error_block;
+/*1E0*/	u8   last_error_func[32];
+/*200*/	u8   mount_opts[64];
+/*240*/	u32  usr_quota_inum;
+/*244*/	u32  grp_quota_inum;
+/*248*/	u32  overhead_clusters;
+/*24C*/	u32  reserved[108];
+/*3FC*/	u32  checksum;
 /*200*/	// End of Super Block
 };
 
@@ -138,22 +175,61 @@ struct super_block {
 #define RW_COMPAT_EXT_ATTR      0x0008
 #define RW_COMPAT_RESIZE_INODE  0x0010
 #define RW_COMPAT_DIR_INDEX     0x0020
-#define RW_COMPAT_UNKNOWN       0xFFC0
+#define RW_COMPAT_UNKNOWN_0040  0x0040
+#define RW_COMPAT_UNKNOWN_0080  0x0080
+#define RW_COMPAT_UNKNOWN_0100  0x0100
+#define RW_COMPAT_UNKNOWN_0200  0x0200
+#define RW_COMPAT_UNKNOWN_0400  0x0400
+#define RW_COMPAT_UNKNOWN_0800  0x0800
+#define RW_COMPAT_UNKNOWN_1000  0x1000
+#define RW_COMPAT_UNKNOWN_2000  0x2000
+#define RW_COMPAT_UNKNOWN_4000  0x4000
+#define RW_COMPAT_UNKNOWN_8000  0x8000
 
 #define RO_COMPAT_SPARSE_SUPER  0x0001
 #define RO_COMPAT_LARGE_FILE    0x0002
 #define RO_COMPAT_BTREE_DIR     0x0004
-#define RO_COMPAT_UNKNOWN       0xFFF8
+#define RO_COMPAT_HUGE_FILE     0x0008
+#define RO_COMPAT_GDT_CSUM      0x0010
+#define RO_COMPAT_DIR_NLINK     0x0020
+#define RO_COMPAT_EXTRA_ISIZE   0x0040
+#define RO_COMPAT_RESERVED_0080 0x0080
+#define RO_COMPAT_QUOTA         0x0100
+#define RO_COMPAT_BIGALLOC      0x0200
+#define RO_COMPAT_METADATA_CSUM 0x0400
+#define RO_COMPAT_UNKNOWN_0800  0x0800
+#define RO_COMPAT_UNKNOWN_1000  0x1000
+#define RO_COMPAT_UNKNOWN_2000  0x2000
+#define RO_COMPAT_UNKNOWN_4000  0x4000
+#define RO_COMPAT_UNKNOWN_8000  0x8000
 
-#define IN_COMPAT_COMPRESSION   0x0001 // There MAY be compressed files on the file system
-#define IN_COMPAT_FILETYPE      0x0002 // Store file type in directory entry
-#define IN_COMPAT_RECOVER       0x0004 // Needs recovery
-#define IN_COMPAT_JOURNAL_DEV   0x0008 // Journal device
-#define IN_COMPAT_META_BG       0x0010 // ???
-#define IN_COMPAT_UNKNOWN       0xFFE0
+#define IN_COMPAT_COMPRESSION      0x0001 // There MAY be compressed files on the file system
+#define IN_COMPAT_FILETYPE         0x0002 // Store file type in directory entry
+#define IN_COMPAT_RECOVER          0x0004 // Needs recovery
+#define IN_COMPAT_JOURNAL_DEV      0x0008 // Journal device
+#define IN_COMPAT_META_BG          0x0010 // ???
+#define IN_COMPAT_RESERVED_0080    0x0020 // ??? used in experimental ext4 driver code?
+#define IN_COMPAT_EXTENTS          0x0040 // Use extents list instead of indirect clusters
+#define IN_COMPAT_64BIT            0x0080 // Besides others, gdt entries are (alt least) 64 bytes instead of 32 bytes long
+#define IN_COMPAT_MMP              0x0100 // Multiple mount protection is in place
+#define IN_COMPAT_FLEX_BG          0x0200 // RW_COMPAT reature: Drop the requirement, that group meta data must reside in group.
+#define IN_COMPAT_EA_INODE         0x0400 // EAs in inode
+#define IN_COMPAT_RESERVED_0800    0x0800 // ??? used in experimental ext4 driver code?
+#define IN_COMPAT_DIRDATA          0x1000 // ??? (data in dirent - whatever that means)
+#define IN_COMPAT_BG_USE_META_CSUM 0x2000 // Calculate checksums for cluster and inode bitmap
+#define IN_COMPAT_LARGEDIR         0x4000 // ??? (>2GB or 3-lvl htree - whatever that means exactly)
+#define IN_COMPAT_INLINEDATA       0x8000 // ??? (data in inode - whatever that means exactly)
+
+/*
+ * METADATA_CSUM also enables group descriptor checksums (GDT_CSUM).  When
+ * METADATA_CSUM is set, group descriptor checksums use the same algorithm as
+ * all other data structures' checksums.  However, the METADATA_CSUM and
+ * GDT_CSUM bits are mutually exclusive.
+ */
+#define EXT4_FEATURE_RO_COMPAT_METADATA_CSUM	0x0400
 
 #define	RW_COMPAT_SUPPORTED (RW_COMPAT_EXT_ATTR)
-#define	IN_COMPAT_SUPPORTED (IN_COMPAT_FILETYPE|IN_COMPAT_RECOVER|IN_COMPAT_META_BG)
+#define	IN_COMPAT_SUPPORTED (IN_COMPAT_FILETYPE|IN_COMPAT_RECOVER|IN_COMPAT_META_BG|IN_COMPAT_64BIT)
 #define	RO_COMPAT_SUPPORTED (RO_COMPAT_SPARSE_SUPER|RO_COMPAT_LARGE_FILE|RO_COMPAT_BTREE_DIR)
 
 #define	RW_COMPAT_UNSUPPORTED ~(RW_COMPAT_EXT_ATTR)
@@ -161,9 +237,35 @@ struct super_block {
 #define	RO_COMPAT_UNSUPPORTED ~(RO_COMPAT_SPARSE_SUPER|RO_COMPAT_LARGE_FILE|RO_COMPAT_BTREE_DIR)
 
 /*
+#if RW_COMPAT_SUPPORTED & RW_COMPAT_UNSUPPORTED
+#error At least one feature flag is contained in both, RW_COMPAT_SUPPORTED & RW_COMPAT_UNSUPPORTED
+#endif
+
+#if IN_COMPAT_SUPPORTED & IN_COMPAT_UNSUPPORTED
+#error At least one feature flag is contained in both, IN_COMPAT_SUPPORTED & IN_COMPAT_UNSUPPORTED
+#endif
+
+#if RO_COMPAT_SUPPORTED & RO_COMPAT_UNSUPPORTED
+#error At least one feature flag is contained in both, RO_COMPAT_SUPPORTED & RO_COMPAT_UNSUPPORTED
+#endif
+
+#if ( RW_COMPAT_SUPPORTED | RW_COMPAT_UNSUPPORTED ) != 0xFFFF
+#error RW_COMPAT_SUPPORTED & RW_COMPAT_UNSUPPORTED together don't contain all possible flags
+#endif
+
+#if ( IN_COMPAT_SUPPORTED | IN_COMPAT_UNSUPPORTED ) != 0xFFFF
+#error IN_COMPAT_SUPPORTED & IN_COMPAT_UNSUPPORTED together don't contain all possible flags
+#endif
+
+#if ( RO_COMPAT_SUPPORTED | RO_COMPAT_UNSUPPORTED ) != 0xFFFF
+#error RO_COMPAT_SUPPORTED & RO_COMPAT_UNSUPPORTED together don't contain all possible flags
+#endif
+*/
+
+/*
  * On-Disk structure of a blocks group descriptor
  */
-struct group_desciptor {
+struct group_desciptor_v1 {
 /*000*/	u32 cluster_allocation_map; // Blocks bitmap block */
 /*004*/	u32 inode_allocation_map;   // Inodes bitmap block */
 /*008*/	u32 inode_table;            // Inodes table block */
@@ -181,9 +283,58 @@ struct group_desciptor {
 /*00C*/	u16 num_free_clusters;      // Free blocks count
 /*00E*/	u16 num_free_inodes;        // Free inodes count
 /*010*/	u16 num_directories;        // Directories count
-/*012*/	u16 pad;
-/*014*/	u32 reserved[3];
+/*012*/	u16 flags;
+/*014*/	u32 snapshot_exclude_bitmap;
+/*018*/	u16 cluster_allocation_map_csum;
+/*01A*/	u16 inode_allocation_map_csum;
+/*01C*/	u16 num_virgin_inodes;
+/*01E*/	u16 csum;
 /*020*/	// End of Structure (32 bytes)
+};
+
+struct group_desciptor_v2 {
+/*000*/	u32 cluster_allocation_map_lo; // Blocks bitmap block */
+/*004*/	u32 inode_allocation_map_lo;   // Inodes bitmap block */
+/*008*/	u32 inode_table_lo;            // Inodes table block */
+/*00C*/	u16 num_free_clusters_lo;      // Free blocks count
+/*00E*/	u16 num_free_inodes_lo;        // Free inodes count
+/*010*/	u16 num_directories_lo;        // Directories count
+/*012*/	u16 flags;
+/*014*/	u32 snapshot_exclude_bitmap_lo;
+/*018*/	u16 cluster_allocation_map_csum_lo;
+/*01A*/	u16 inode_allocation_map_csum_lo;
+/*01C*/	u16 num_virgin_inodes_lo;
+/*01E*/	u16 csum;
+/*020*/	u32 cluster_allocation_map_hi;
+/*024*/	u32 inode_allocation_map_hi;
+/*028*/	u32 inode_table_hi;
+/*02C*/	u16 num_free_clusters_hi;
+/*02E*/	u16 num_free_inodes_hi;
+/*030*/	u16 num_directories_hi;
+/*032*/	u16 num_virgin_inodes_hi;
+/*034*/	u32 snapshot_exclude_bitmap_hi;
+/*038*/	u16 cluster_allocation_map_csum_hi;
+/*03A*/	u16 inode_allocation_map_csum_hi;
+/*03C*/	u32 reserved;
+/*040*/	// End of Structure (64 bytes)
+};
+
+struct group_desciptor_in_memory {
+	u64 cluster_allocation_map;
+	u64 inode_allocation_map;
+	u64 inode_table;
+	u64 snapshot_exclude_bitmap;
+	
+	u32 num_free_clusters;
+	u32 num_free_inodes;
+	u32 num_directories;
+	u32 cluster_allocation_map_csum;
+	u32 inode_allocation_map_csum;
+	u32 num_virgin_inodes;
+	u32 reserved;
+	
+	u16 csum;
+	u16 flags;
 };
 
 #define NUM_ZIND 12 // zero    indirect -> direct
@@ -337,6 +488,42 @@ struct inode {
 #endif
 };
 
+#define EXTENT_HEADER_MAGIC 0xf30a
+struct extent_header {
+	u16 magic; // May be needed in future to distinct different extent storage formats
+	u16 num_entries; // Number of following extent entries - either all extent_descriptor (depth == 0) or all extent_index (depth > 0).
+	u16 max_entries; // Max number of following extent entries - actually this value is used to compute the offset of the checksum field (extent_tail)
+	u16 depth; // The depth until we reach extent_descriptor (until then, we have to deal with extent_index structures.
+	u32 generation; // generation of the tree - whatever that means
+};
+
+/*
+ * Assume a file with 3 extents:
+ * The first 5 clusters of the file are stored in 4711 to 4715 on disc. The extent for that could be initialized this way:
+ * struct extent_descriptor first = { 0, 5, 0, 4711 };
+ * The following 12 clusters are stored at clusters 2342 to 2353, so the next extent looks like this:
+ * struct extent_descriptor second = { 5, 12, 0, 2342 };
+ * The third extent is 3 clusters stored at 123 to 125:
+ * struct extent_descriptor third = { 17, 3, 0, 123 };
+ */
+struct extent_descriptor {
+	u32 file_cluster; // The extent covered by this descriptor represents the file data starting at the offset file_cluster in the file
+	u16 len; // Number of clusters covered by this descriptor.
+	u16 disk_cluster_hi; // The uppermost 16 bits of the 48 bit cluster number of the first block of this extent in the data area
+	u32 disk_cluster_lo; // And the lower 32 bits.
+};
+
+struct extent_index {
+	u32 file_cluster; // The extents covered by this index represents the file data starting at the offset file_cluster in the file
+	u32 leaf_lo; // The lower 32 bits of the cluster number where either the next extent index table or the next extent descriptor table can be found.
+	u16 leaf_hi; // And the higher 16 bits.
+	u16 unused;
+};
+
+struct extent_tail {
+	u32 checksum; // Stored 
+};
+
 // See comment for entry size_high in struct inode
 #define dir_acl size_high
 
@@ -379,13 +566,26 @@ struct inode {
 #define	INOF_NOTAIL              0x00008000 // file tail should not be merged
 #define	INOF_DIRSYNC             0x00010000 // dirsync behaviour (directories only)
 #define	INOF_TOPDIR              0x00020000 // Top of directory hierarchies
+#define INOF_HUGE_FILE           0x00040000
+#define INOF_EXTENTS             0x00080000 // The data associated to this inode is recorded in extents instead of indirect clusters
+#define INOF_RESERVED_00100000   0x00100000
+#define INOF_EA_INODE            0x00200000 // Inode used for a large extended attribute (whatever that means)
+#define INOF_EOFBLOCKS           0x00400000 // This file has blocks allocated past EOF (for what reason?).
+#define INOF_UNKNOWN_00800000    0x00800000
+#define INOF_UNKNOWN_01000000    0x01000000
+#define INOF_UNKNOWN_02000000    0x02000000
+#define INOF_UNKNOWN_04000000    0x04000000
+#define INOF_UNKNOWN_08000000    0x08000000
+#define INOF_UNKNOWN_10000000    0x10000000
+#define INOF_UNKNOWN_20000000    0x20000000
+#define INOF_UNKNOWN_40000000    0x40000000
 #define	INOF_TOOLCHAIN           0x80000000 // This bit is reserved for the ext2 library. File system drivers should just ignore it and not modify it.
 
 #define INOF_E2COMPR_FLAGS (INOF_E2COMPR_DIRTY|INOF_E2COMPR_COMPR|INOF_E2COMPR_HASCOMPRBLK|INOF_E2COMPR_NOCOMPR|INOF_E2COMPR_ERROR)
 
 #define	INOF_USER_VISIBLE        0x0003DFFF // User visible flags
 #define	INOF_USER_MODIFIABLE     0x000380FF // User modifiable flags
-#define INOF_UNKNOWN_FLAGS       0x7FFC0000 // No unknown flag may be set. This mask here is ease checking this requirement.
+// #define INOF_UNKNOWN_FLAGS       0x7F800000 // No unknown flag may be set. This mask here is ease checking this requirement.
 
 /*
  * Inode dynamic state flags

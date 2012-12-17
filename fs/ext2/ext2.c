@@ -1,3 +1,5 @@
+#define __athlon__
+
 #include <btatomic.h>
 #define _GNU_SOURCE
 
@@ -53,7 +55,7 @@ epi=entries per inode (z.B. 256 für 1024 cluster size)
 0x8000000X+2-0x8..Y -> Dies ist eine Gruppenbeschreibung, inode nummer gibt Gruppe an, Y=Anzahl Cluster für Gruppenbeschreibung+1+X
 */
 
-#define BTCLONE
+// #define BTCLONE // broken on amd64?
 #define COMC_IN_MEMORY
 
 /*
@@ -171,11 +173,21 @@ int btclone(void * * stack_memory,int (*thread_main)(void * arg),size_t stack_si
 		return -1;
 	}
 	
+	/*
+	 * nice try, but doesn't work on amd64 with register argument passing ...
+	 *
+	 * So, just break the one platform that has stack growth in the "wrong" direction.
+	 */
+/*
 	if ((char *)&stack_memory>(char *)&stack_argument) {
+*/
 		stack_argument=(char *)*stack_memory+stack_size;
+/*
 	} else {
 		stack_argument=*stack_memory;
+		assert(0);
 	}
+*/
 	
 	int retval=clone(thread_main,stack_argument,flags,arg);
 	
@@ -248,15 +260,110 @@ void endian_swap_sb(struct super_block * sb) {
 	le32(sb->first_meta_bg);
 }
 
-void endian_swap_gdt(struct group_desciptor * gdt,unsigned num_groups) {
-	for (unsigned group=0;group<num_groups;++group) {
-		le32(gdt[group].cluster_allocation_map);
-		le32(gdt[group].inode_allocation_map);
-		le32(gdt[group].inode_table);
-		le16(gdt[group].num_free_clusters);
-		le16(gdt[group].num_free_inodes);
-		le16(gdt[group].num_directories);
+void gdt_disk2memory_v1(struct group_desciptor_in_memory *gdt, struct group_desciptor_v1 *gdtv1, unsigned num_groups) {
+	for (unsigned group = 0; group < num_groups; ++group) {
+		gdt[group].cluster_allocation_map = le2host32(gdtv1[group].cluster_allocation_map);
+		gdt[group].inode_allocation_map = le2host32(gdtv1[group].inode_allocation_map);
+		gdt[group].inode_table = le2host32(gdtv1[group].inode_table);
+		gdt[group].num_free_clusters = le2host16(gdtv1[group].num_free_clusters);
+		gdt[group].num_free_inodes = le2host16(gdtv1[group].num_free_inodes);
+		gdt[group].num_directories = le2host16(gdtv1[group].num_directories);
+		gdt[group].flags = le2host16(gdtv1[group].flags);
+		gdt[group].snapshot_exclude_bitmap = le2host32(gdtv1[group].snapshot_exclude_bitmap);
+		gdt[group].cluster_allocation_map_csum = le2host16(gdtv1[group].cluster_allocation_map_csum);
+		gdt[group].inode_allocation_map_csum = le2host16(gdtv1[group].inode_allocation_map_csum);
+		gdt[group].num_virgin_inodes = le2host16(gdtv1[group].num_virgin_inodes);
+		gdt[group].csum = le2host16(gdtv1[group].csum);
 	}
+}
+
+void gdt_disk2memory_v2(struct group_desciptor_in_memory *gdt, struct group_desciptor_v2 *gdtv2, unsigned num_groups) {
+	for (unsigned group = 0; group < num_groups; ++group) {
+		gdt[group].cluster_allocation_map = le2host32(gdtv2[group].cluster_allocation_map_lo) | ((u64)le2host32(gdtv2[group].cluster_allocation_map_hi) << 32);
+		gdt[group].inode_allocation_map = le2host32(gdtv2[group].inode_allocation_map_lo) | ((u64)le2host32(gdtv2[group].inode_allocation_map_hi) << 32);
+		gdt[group].inode_table = le2host32(gdtv2[group].inode_table_lo) | ((u64)le2host32(gdtv2[group].inode_table_hi) << 32);
+		gdt[group].num_free_clusters = le2host16(gdtv2[group].num_free_clusters_lo) | ((u32)le2host16(gdtv2[group].num_free_clusters_hi) << 16);
+		gdt[group].num_free_inodes = le2host16(gdtv2[group].num_free_inodes_lo) | ((u32)le2host16(gdtv2[group].num_free_inodes_hi) << 16);
+		gdt[group].num_directories = le2host16(gdtv2[group].num_directories_lo) | ((u32)le2host16(gdtv2[group].num_directories_hi) << 16);
+		gdt[group].snapshot_exclude_bitmap = le2host32(gdtv2[group].snapshot_exclude_bitmap_lo) | ((u64)le2host32(gdtv2[group].snapshot_exclude_bitmap_hi) << 32);
+		gdt[group].cluster_allocation_map_csum = le2host16(gdtv2[group].cluster_allocation_map_csum_lo) | ((u32)le2host16(gdtv2[group].cluster_allocation_map_csum_hi) << 16);
+		gdt[group].inode_allocation_map_csum = le2host16(gdtv2[group].inode_allocation_map_csum_lo) | ((u32)le2host16(gdtv2[group].inode_allocation_map_csum_hi) << 16);
+		gdt[group].num_virgin_inodes = le2host16(gdtv2[group].num_virgin_inodes_lo) | ((u32)le2host16(gdtv2[group].num_virgin_inodes_hi) << 16);
+		gdt[group].flags = le2host16(gdtv2[group].flags);
+		gdt[group].reserved = le2host32(gdtv2[group].reserved);
+		gdt[group].csum = le2host16(gdtv2[group].csum);
+	}
+}
+
+void endian_swap_extent_header(struct extent_header * eh) {
+	le16(eh->magic);
+	le16(eh->num_entries);
+	le16(eh->max_entries);
+	le16(eh->depth);
+	le32(eh->generation);
+}
+
+void endian_swap_extent_descriptor(struct extent_descriptor * ed) {
+	le32(ed->file_cluster);
+	le16(ed->len);
+	le16(ed->disk_cluster_hi);
+	le32(ed->disk_cluster_lo);
+}
+
+void endian_swap_extent_index(struct extent_index * ei) {
+	le32(ei->file_cluster);
+	le32(ei->leaf_lo);
+	le16(ei->leaf_hi);
+	le16(ei->unused);
+}
+
+void endian_swap_extent_tail(struct extent_tail * et) {
+	le32(et->checksum);
+}
+
+bool endian_swap_extent_block(char * eb, size_t size) {
+	struct extent_header * eh = (struct extent_header *)eb;
+	
+	eb += 12;
+	
+	endian_swap_extent_header(eh);
+	
+	/*
+	if (eh->magic != EXTENT_HEADER_MAGIC) {
+		// endian_swap_extent_header(eh); // swap back
+		return false;
+	}
+	*/
+	
+	u16 num = eh->num_entries;
+	if (num > size / 12 - 1) {
+		// endian_swap_extent_header(eh); // swap back
+		/*
+		return false;
+		*/
+		num = size / 12 - 1;
+	}
+	
+	if (eh->depth) {
+		while (num--) {
+			struct extent_index * ei = (struct extent_index *)eb;
+			eb += 12;
+			endian_swap_extent_index(ei);
+		}
+	} else {
+		while (num--) {
+			struct extent_descriptor * ed = (struct extent_descriptor *)eb;
+			eb += 12;
+			endian_swap_extent_descriptor(ed);
+		}
+	}
+	
+	if (size != 60) {
+		struct extent_tail * et = (struct extent_tail *)eb;
+		endian_swap_extent_tail(et);
+	}
+	
+	return true;
 }
 
 void endian_swap_inode(struct inode * inode) {
@@ -272,8 +379,12 @@ void endian_swap_inode(struct inode * inode) {
 	le32(inode->num_blocks);
 	le32(inode->flags);
 	le32(inode->translator);
-	for (int i=0;i<NUM_CLUSTER_POINTERS;++i) {
-		le32(inode->cluster[i]);
+	if (!(inode->flags & INOF_EXTENTS)) {
+		for (int i=0;i<NUM_CLUSTER_POINTERS;++i) {
+			le32(inode->cluster[i]);
+		}
+	} else {
+		endian_swap_extent_block((char*)inode->cluster, sizeof(inode->cluster));
 	}
 	le32(inode->generation);
 	le32(inode->file_acl);
@@ -467,7 +578,9 @@ struct com_cache {
 
 struct scan_context {
 	struct bdev * bdev;
-	struct group_desciptor * gdt;
+	struct group_desciptor_in_memory * gdt;
+	struct group_desciptor_v1 * gdtv1;
+	struct group_desciptor_v2 * gdtv2;
 	struct inode * inode_table;
 	struct btlock_lock * cam_lock;
 	struct progress_bar * progress_bar;
@@ -555,15 +668,20 @@ struct scan_context {
 };
 
 bool read_super(struct scan_context * sc,struct super_block * sb,unsigned group,block_t offset,bool probing) {
-	if (1!=bdev_read(sc->bdev,offset,1,(void *)sb)) {
-		ERRORF("%s: Couldn't read block %llu while trying to read super block of group %u.",sc->name,(unsigned long long)offset,group);
+	if (2!=bdev_read(sc->bdev,offset,2,(void *)sb)) {
+		ERRORF("%s: Couldn't read blocks %llu and %llu while trying to read super block of group %u.",sc->name,(unsigned long long)offset,(unsigned long long)(offset+1),group);
 		return false;
 	} else {
 		endian_swap_sb(sb);
 		
 		if (sb->magic==MAGIC) {
-			if (sb->my_group!=group) {
-				ERRORF("%s: Cluster group %u contains a super block backup claiming to belonging to cluster group %u.",sc->name,(unsigned)group,sb->my_group);
+			u16 g = group > 65535 ? 65535 : group;
+			if (sb->my_group != g) {
+				if (g != group) {
+					ERRORF("%s: Cluster group %u contains a super block backup claiming to belonging to cluster group %u (should be 65535).",sc->name,(unsigned)group,sb->my_group);
+				} else {
+					ERRORF("%s: Cluster group %u contains a super block backup claiming to belonging to cluster group %u.",sc->name,(unsigned)group,sb->my_group);
+				}
 				return false;
 			}
 			if (probing) {
@@ -886,7 +1004,7 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	return true;
 }
 
-bool exit_request_com_cache_thread=false;
+volatile bool exit_request_com_cache_thread=false;
 // btlock_t wait_for_com_cache_thread;
 
 THREAD_RETURN_TYPE com_cache_thread(void * arg) {
@@ -921,7 +1039,7 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 			int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_RDONLY);
 			if (fd<0) {
 				if (errno!=ENOENT) {
-					eprintf("open(»%s«): %s\n",tmp,strerror(errno));
+					eprintf("cluster-owner-map-cache-thread: OOPS: open(»%s«): %s\n",tmp,strerror(errno));
 					exit(2);
 				}
 				free(tmp);
@@ -937,18 +1055,18 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 				if (CC_DEBUG_LOCKS) eprintf("%4i in thread %5i: Reading data by using fd %i\n",__LINE__,gettid(),fd);
 				uLongf dbuflen=read(fd,cbuffer,cbuflen);
 				if (close(fd)) {
-					eprintf("close(»%s«): %s\n",tmp,strerror(errno));
+					eprintf("cluster-owner-map-cache-thread: OOPS: close(»%s«): %s\n",tmp,strerror(errno));
 					exit(2);
 				}
 				free(tmp);
 #endif // #ifdef COMC_IN_MEMORY, else
 				uLongf x=4*sc->comc.clusters_per_entry;
 				if (Z_OK!=uncompress((Bytef*)walk->entry,&x,(Bytef*)cbuffer,dbuflen)) {
-					eprintf("uncompress failed\n");
+					eprintf("cluster-owner-map-cache-thread: OOPS: uncompress failed\n");
 					exit(2);
 				}
 				if (x!=4*sc->comc.clusters_per_entry) {
-					eprintf("uncompress failed\n");
+					eprintf("cluster-owner-map-cache-thread: OOPS: uncompress failed\n");
 					exit(2);
 				}
 			}
@@ -986,7 +1104,7 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 						// BEGIN WRITING
 						uLongf dbuflen=cbuflen;
 						if (Z_OK!=compress2((Bytef*)cbuffer,&dbuflen,(Bytef*)walk->entry,4*sc->comc.clusters_per_entry,1)) {
-							eprintf("compress2 failed\n");
+							eprintf("cluster-owner-map-cache-thread: OOPS: compress2 failed\n");
 							exit(2);
 						}
 #ifdef COMC_IN_MEMORY
@@ -996,17 +1114,17 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 						char * tmp;
 						int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_CREAT|O_TRUNC|O_WRONLY,0666);
 						if (fd<0) {
-							eprintf("open(»%s«): %s\n",tmp,strerror(errno));
+							eprintf("cluster-owner-map-cache-thread: OOPS: open(»%s«): %s\n",tmp,strerror(errno));
 							exit(2);
 						} else {
 							if (CC_DEBUG_LOCKS) eprintf("%4i in thread %5i: Writing data by using fd %i\n",__LINE__,gettid(),fd);
 						}
 						if ((ssize_t)dbuflen!=write(fd,cbuffer,dbuflen)) {
-							eprintf("write(»%s«): %s\n",tmp,strerror(errno));
+							eprintf("cluster-owner-map-cache-thread: OOPS: write(»%s«): %s\n",tmp,strerror(errno));
 							exit(2);
 						}
 						if (close(fd)) {
-							eprintf("close(»%s«): %s\n",tmp,strerror(errno));
+							eprintf("cluster-owner-map-cache-thread: OOPS: close(»%s«): %s\n",tmp,strerror(errno));
 							exit(2);
 						}
 						free(tmp);
@@ -1058,6 +1176,9 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 	free(cbuffer);
 	exit_request_com_cache_thread=false;
 	CCT_WAKE();
+	
+	eprintf("Returning from com_cache_thread (exiting cluster-owner-map-cache-thread)\n");
+	
 	return 0;
 }
 
@@ -1351,6 +1472,9 @@ THREAD_RETURN_TYPE ext2_read_tables(void * arg) {
 		NOTIFYF("%s: Background reader is successfully quitting",sc->name);
 		--live_child;
 	}
+	
+	eprintf("Returning from ext2_read_tables thread (exiting)\n");
+	
 	THREAD_RETURN();
 }
 
@@ -1397,7 +1521,12 @@ void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) 
 		;
 		if (!inode) {
 //			NOTIFYF("%s: Inode %lu [%s]: Cluster %lu: Free directory record of length %u bytes.",isc->sc->name,isc->inode_num,isc->type,cluster,reclen);
-			offset+=reclen;
+			if (reclen < 8) {
+				ERRORF("%s: Inode %lu [%s]: reclen is to small. reclen=%u - skipping rest of cluster.",isc->sc->name,isc->inode_num,isc->type,(unsigned)reclen);
+				offset = isc->sc->cluster_size_Bytes; // Skip rest of cluster to prevent endless loop
+			} else {
+				offset+=reclen;
+			}
 			continue;
 		}
 		
@@ -1432,7 +1561,8 @@ void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) 
 		*/
 		
 		if (filename_len+8>reclen) {
-			ERRORF("%s: Inode %lu [%s]: reclen is to small for filename. reclen=%u, decoded filename of size %u: \"%s\".",isc->sc->name,isc->inode_num,isc->type,(unsigned)reclen,(unsigned)filename_len,filename);
+			ERRORF("%s: Inode %lu [%s]: reclen is to small for filename. reclen=%u, decoded filename of size %u: \"%s\" - skipping rest of cluster.",isc->sc->name,isc->inode_num,isc->type,(unsigned)reclen,(unsigned)filename_len,filename);
+			offset = isc->sc->cluster_size_Bytes; // Skip rest of cluster to prevent endless loop
 		}
 		
 		struct dirent_list * dl;
@@ -1532,6 +1662,119 @@ void chk_block(struct inode_scan_context * isc,int level,unsigned long cluster) 
 	}
 }
 
+u32 chk_extent_block(struct inode_scan_context * isc, u32 file_cluster, char * eb, size_t size, unsigned depth) {
+	bool in_inode = size == 60;
+	
+	if (!in_inode) {
+		++isc->used_clusters;
+	}
+	
+	struct extent_header * eh;
+	struct extent_tail * et;
+	
+	eh = (struct extent_header *)eb; eb += 12; size -= 12;
+	
+	if (eh->magic != EXTENT_HEADER_MAGIC) {
+		ERRORF("%s: Inode %lu [%s]: %s extent header has wrong magic value (0x%04x, shoud be 0x%04x).",isc->sc->name,isc->inode_num,isc->type,in_inode?"In-inode":"External",(unsigned)eh->magic,EXTENT_HEADER_MAGIC);
+	}
+	
+	unsigned num = eh->num_entries;
+	unsigned max = eh->max_entries;
+	
+	if (num > max) {
+		ERRORF("%s: Inode %lu [%s]: %s extent header denotes a num entries value (%u) > max entries value (%u).",isc->sc->name,isc->inode_num,isc->type,in_inode?"In-inode":"External",num,max);
+		num = max;
+	}
+	
+	if (max > (in_inode ? 4 : isc->sc->cluster_size_Bytes / 12 - 1)) {
+		ERRORF("%s: Inode %lu [%s]: %s extent header denotes a max entries value > 4: %u.",isc->sc->name,isc->inode_num,isc->type,in_inode?"In-inode":"External",max);
+		max = 4;
+		
+		if (num > max) {
+			ERRORF("%s: Inode %lu [%s]: %s extent header denotes a num entries value (%u) > max entries value (%u).",isc->sc->name,isc->inode_num,isc->type,in_inode?"In-inode":"External",num,max);
+			num = max;
+		}
+	}
+	
+	if (!in_inode && eh->depth != depth) {
+		ERRORF("%s: Inode %lu [%s]: External extent header's depth field is %u, should be %u,",isc->sc->name,isc->inode_num,isc->type,eh->depth,depth);
+	}
+	
+	char * block_buffer = malloc(isc->sc->cluster_size_Bytes);
+	if (!block_buffer) {
+		ERRORF("%s: Inode %lu [%s]: While processing %s extent block: Cannot recurse extent structure: No memory left.",isc->sc->name,isc->inode_num,isc->type,in_inode?"in-inode":"external");
+		return file_cluster;
+	}
+	
+	if (eh->depth) {
+		struct extent_index * ei = (struct extent_index *)eb;
+		
+		for (; num--; ++ei) {
+			if (ei->file_cluster != file_cluster) {
+				if (ei->file_cluster < file_cluster) {
+					ERRORF("%s: Inode %lu [%s]: While processing %s extent index: Oops, unsorted extent information detected ...",isc->sc->name,isc->inode_num,isc->type,in_inode?"in-inode":"external");
+				/*
+				} else {
+					NOTIFYF("%s: Inode %lu [%s]: While processing %s extent index: File hole detected.",isc->sc->name,isc->inode_num,isc->type,in_inode?"in-inode":"external");
+				*/
+				}
+			}
+			
+			block_t leaf = isc->sc->cluster_size_Blocks * ((block_t)ei->leaf_lo | ((block_t)ei->leaf_hi << 32));
+			
+			if (isc->sc->cluster_size_Blocks != bdev_read(isc->sc->bdev,leaf,isc->sc->cluster_size_Blocks,(unsigned char *)block_buffer)) {
+				ERRORF("%s: Inode %lu [%s]: While processing %s extent index: Read error while trying to read an extent cluster.",isc->sc->name,isc->inode_num,isc->type,in_inode?"in-inode":"external");
+				// TODO: Read and process as much as possible block-wise
+				continue;
+			}
+			
+			endian_swap_extent_block(block_buffer, isc->sc->cluster_size_Blocks);
+			
+			file_cluster = chk_extent_block(isc, ei->file_cluster, block_buffer, isc->sc->cluster_size_Bytes, eh->depth - 1);
+		}
+	} else {
+		struct extent_descriptor * ed = (struct extent_descriptor *)eb;
+		
+		for (; num--; ++ed) {
+			if (ed->file_cluster != file_cluster) {
+				if (ed->file_cluster < file_cluster) {
+					ERRORF("%s: Inode %lu [%s]: While processing %s extent descriptor: Oops, unsorted extent information detected ...",isc->sc->name,isc->inode_num,isc->type,in_inode?"in-inode":"external");
+				/*
+				} else {
+					NOTIFYF("%s: Inode %lu [%s]: While processing %s extent descriptor: File hole detected.",isc->sc->name,isc->inode_num,isc->type,in_inode?"in-inode":"external");
+				*/
+				}
+			}
+			
+			if (!ed->len) {
+				ERRORF("%s: Inode %lu [%s]: In %s extend descriptor: Bogus length field (0).",isc->sc->name,isc->inode_num,isc->type,in_inode?"in-inode":"external");
+			}
+			
+			unsigned real_length = (ed->len <= 0x8000) ? ed->len : (ed->len & 0x7fff);
+			file_cluster = ed->file_cluster + real_length;
+			
+			block_t disc_cluster = (block_t)ed->disk_cluster_lo | ((block_t)ed->disk_cluster_hi << 16);
+			for (unsigned num = real_length; num--; ) {
+				chk_block(isc,0,disc_cluster++);
+			}
+		}
+	}
+	free(block_buffer);
+	
+	// TODO: eh->generation ???
+	
+	eb += 12 * (size / 12);
+	et = (struct extent_tail *)eb;
+	
+	/*
+	if (size % 12) {
+		// TODO: Verify checksum
+	}
+	*/
+	
+	return file_cluster;
+}
+
 struct thread {
 	struct thread * volatile next;
 	struct thread * volatile prev;
@@ -1572,23 +1815,27 @@ THREAD_RETURN_TYPE chk_block_function(void * arg) {
 	
 	isc_schedule_cluster_init(isc);
 	
-	for (unsigned z=0;z<NUM_ZIND;++z) {
-		chk_block(isc,0,isc->inode->cluster[z]);
+	if (!(isc->inode->flags & INOF_EXTENTS)) {
+		for (unsigned z=0;z<NUM_ZIND;++z) {
+			chk_block(isc,0,isc->inode->cluster[z]);
+		}
+		
+		chk_block(isc,1,isc->inode->cluster[FIRST_SIND]);
+		/*
+		if (inode->cluster[FIRST_DIND] || inode->cluster[FIRST_TIND]) {
+			PRINT_PROGRESS_BAR(inode_num);
+		}
+		*/
+		chk_block(isc,2,isc->inode->cluster[FIRST_DIND]);
+		/*
+		if (inode->cluster[FIRST_DIND] || inode->cluster[FIRST_TIND]) {
+			PRINT_PROGRESS_BAR(inode_num);
+		}
+		*/
+		chk_block(isc,3,isc->inode->cluster[FIRST_TIND]);
+	} else {
+		chk_extent_block(isc, 0, (char *)isc->inode->cluster, 60, 0);
 	}
-	
-	chk_block(isc,1,isc->inode->cluster[FIRST_SIND]);
-/*
-	if (inode->cluster[FIRST_DIND] || inode->cluster[FIRST_TIND]) {
-		PRINT_PROGRESS_BAR(inode_num);
-	}
-*/
-	chk_block(isc,2,isc->inode->cluster[FIRST_DIND]);
-/*
-	if (inode->cluster[FIRST_DIND] || inode->cluster[FIRST_TIND]) {
-		PRINT_PROGRESS_BAR(inode_num);
-	}
-*/
-	chk_block(isc,3,isc->inode->cluster[FIRST_TIND]);
 	
 	isc_schedule_cluster_flush(isc);
 	
@@ -1747,13 +1994,13 @@ void cluster_scan_inode(struct inode_scan_context * isc) {
 	
 	struct thread * t=malloc(sizeof(*t));
 	if (!t) {
-		eprintf("malloc(t) failed: %s\n",strerror(errno));
+		eprintf("cluster_scan_inode: OOPS: malloc(t) failed: %s\n",strerror(errno));
 		exit(2);
 	}
 	
 	t->lock=btlock_lock_mk();
 	if (!t->lock) {
-		eprintf("lock_mk failed: %s\n",strerror(errno));
+		eprintf("cluster_scan_inode: OOPS: btlock_lock_mk failed: %s\n",strerror(errno));
 		exit(2);
 	}
 	
@@ -2003,18 +2250,11 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 		ok=false;
 	}
 	
-	if (isc->type_bit&~FTB_DIRE) {
-		if (isc->inode->flags&INOF_INDEX) {
-			ERRORF("%s: Inode %lu [%s] has INDEX flag set (which does make sense for directories only)",isc->sc->name,isc->inode_num,isc->type);
-			ok=false;
-		}
-		if (isc->inode->flags&INOF_DIRSYNC) {
-			ERRORF("%s: Inode %lu [%s] has DIRSYNC flag set (which does make sense for directories only)",isc->sc->name,isc->inode_num,isc->type);
-			ok=false;
-		}
-	}
-	
 	if (isc->type_bit&~(FTB_DIRE|FTB_FILE)) {
+		if (isc->inode->flags&INOF_SECURE_REMOVE) {
+			ERRORF("%s: Inode %lu [%s] has SECURE_REMOVE flag set.",isc->sc->name,isc->inode_num,isc->type);
+			ok=false;
+		}
 		if (isc->inode->flags&INOF_IMMUTABLE) {
 			ERRORF("%s: Inode %lu [%s] has IMMUTABLE flag set.",isc->sc->name,isc->inode_num,isc->type);
 			ok=false;
@@ -2023,22 +2263,13 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 			ERRORF("%s: Inode %lu [%s] has APPEND_ONLY flag set.",isc->sc->name,isc->inode_num,isc->type);
 			ok=false;
 		}
-		if (isc->inode->flags&INOF_SECURE_REMOVE) {
-			ERRORF("%s: Inode %lu [%s] has SECURE_REMOVE flag set.",isc->sc->name,isc->inode_num,isc->type);
-			ok=false;
-		}
 	}
 	
-	if (isc->type_bit&~(FTB_DIRE|FTB_FILE|FTB_SLNK)) {
-		if (isc->inode->flags&INOF_SYNC) {
-			ERRORF("%s: Inode %lu [%s] has SYNC flag set.",isc->sc->name,isc->inode_num,isc->type);
-			ok=false;
-		}
-	}
+	// We ignore INOF_UNRM completely
 	
 	if (isc->inode->flags&INOF_E2COMPR_FLAGS) {
 		if (!(isc->sc->sb->in_compat&IN_COMPAT_COMPRESSION)) {
-			ERRORF("%s: Inode %lu [%s] has at lease one compression flag set but filesystem has the feature bit not set",isc->sc->name,isc->inode_num,isc->type);
+			ERRORF("%s: Inode %lu [%s] has at least one compression flag set but filesystem has the feature bit not set",isc->sc->name,isc->inode_num,isc->type);
 			// 1.) Set feature flag
 			// 2.) Reset compression flags (w/ot decompression)
 			// 3.) Reset compression flags (with decompression)
@@ -2059,12 +2290,12 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 				}
 				
 				if (isc->type_bit&FTB_FILE) {
-					if (isc->inode->flags&INOF_E2COMPR_DIRTY) {
-						NOTIFYF("%s: Inode %lu [%s] has flag E2COMPR_DIRTY set.",isc->sc->name,isc->inode_num,isc->type);
-					}
-					
 					if (isc->inode->flags&INOF_E2COMPR_COMPR) {
 						NOTIFYF("%s: Inode %lu [%s] has flag E2COMPR_COMPR set.",isc->sc->name,isc->inode_num,isc->type);
+					}
+					
+					if (isc->inode->flags&INOF_E2COMPR_DIRTY) {
+						NOTIFYF("%s: Inode %lu [%s] has flag E2COMPR_DIRTY set.",isc->sc->name,isc->inode_num,isc->type);
 					}
 					
 					if (isc->inode->flags&INOF_E2COMPR_HASCOMPRBLK) {
@@ -2080,6 +2311,27 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 					}
 				}
 			}
+		}
+	}
+	
+	if (isc->type_bit&~(FTB_DIRE|FTB_FILE|FTB_SLNK)) {
+		if (isc->inode->flags&INOF_SYNC) {
+			ERRORF("%s: Inode %lu [%s] has SYNC flag set.",isc->sc->name,isc->inode_num,isc->type);
+			ok=false;
+		}
+	}
+	
+	// We ignore INOF_NODUMP (this inode should not be backed up) completely
+	// We ignore INOF_NOATIME (do not update atime on access) completely
+	
+	if (isc->type_bit&~FTB_DIRE) {
+		if (isc->inode->flags&INOF_INDEX) {
+			ERRORF("%s: Inode %lu [%s] has INDEX flag set (which does make sense for directories only)",isc->sc->name,isc->inode_num,isc->type);
+			ok=false;
+		}
+		if (isc->inode->flags&INOF_DIRSYNC) {
+			ERRORF("%s: Inode %lu [%s] has DIRSYNC flag set (which does make sense for directories only)",isc->sc->name,isc->inode_num,isc->type);
+			ok=false;
 		}
 	}
 	
@@ -2100,7 +2352,7 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 	
 	if (isc->inode->flags&INOF_JOURNAL_DATA
 	&&  !(isc->sc->sb->rw_compat&RW_COMPAT_HAS_JOURNAL)) {
-		ERRORF("%s: Inode %lu [%s] has flag IMAGIC set.",isc->sc->name,isc->inode_num,isc->type);
+		ERRORF("%s: Inode %lu [%s] has flag JOURNAL_DATA set.",isc->sc->name,isc->inode_num,isc->type);
 		/*
 		 * 1.) Allow feature
 		 *
@@ -2126,12 +2378,64 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 		isc->inode->flags^=INOF_TOPDIR;
 	}
 	
-	// We ignore INOF_UNRM and INOF_TOOLCHAIN completely
+	if (isc->inode->flags&INOF_HUGE_FILE) {
+		NOTIFYF("%s: Inode %lu [%s] has unsupported flag HUGE_FILE set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
 	
+	// Proper handling of INOF_EXTENTS is established
+	
+	if (isc->inode->flags&INOF_RESERVED_00100000) {
+		NOTIFYF("%s: Inode %lu [%s] has unsupported flag RESERVED_00100000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_EA_INODE) {
+		NOTIFYF("%s: Inode %lu [%s] has unsupported flag EA_INODE set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_EOFBLOCKS) {
+		NOTIFYF("%s: Inode %lu [%s] has unsupported flag EOFBLOCKS set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_00800000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_00800000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_01000000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_01000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_02000000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_02000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_04000000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_04000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_08000000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_08000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_10000000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_10000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_20000000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_20000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	if (isc->inode->flags&INOF_UNKNOWN_40000000) {
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_40000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+	}
+	
+	// We ignore INOF_TOOLCHAIN completely
+	
+	/*
 	if (isc->inode->flags&INOF_UNKNOWN_FLAGS) {
 		// We report this problem, but don't consider doing anything about it.
 		NOTIFYF("%s: Inode %lu [%s] has unknown flag bits set: %lu.",isc->sc->name,isc->inode_num,isc->type,(unsigned long)isc->inode->flags&INOF_UNKNOWN_FLAGS);
 	}
+	*/
 	
 	if (isc->inode->file_acl) {
 		NOTIFYF("%s: Inode %lu [%s]: Don't know how to handle file_acl=%lu.",isc->sc->name,isc->inode_num,isc->type,(unsigned long)isc->inode->file_acl);
@@ -2212,6 +2516,8 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 	cluster_scan_inode(isc);
 }
 /*
+	TODO: Recheck this table:
+	
 	                   // FILE DIRE SLNK FIFO SOCK CDEV BDEV lc=0
 	u16 mode&0x0fff;   // mode mode mode mode mode mode mode ---- -> immer ok
 	u16 uid;           // uid  uid  uid  uid  uid  uid  uid  ---- -> immer ok
@@ -2267,8 +2573,17 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 void ext2_dump_file(struct scan_context * sc,const char * path,const char * filename);
 void ext2_redump_file(struct scan_context * sc,const char * path,const char * filename);
 
+static inline unsigned long long u64_to_ull(u64 * v) { return *v; }
+static inline unsigned long u32_to_ul(u32 * v) { return *v; }
+static inline unsigned u16_to_u(u16 * v) { return *v; }
+static inline unsigned u08_to_u(u8  * v) { return *v; }
+
 bool ext2_fsck(const char * _name) {
-	struct scan_context * sc;
+	struct scan_context * sc = NULL;
+	struct super_block * sb2 = NULL;
+	struct group_desciptor_v1 * gdt2v1 = NULL;
+	struct group_desciptor_v2 * gdt2v2 = NULL;
+	struct group_desciptor_in_memory * gdt2im = NULL;
 	
 	bool retval=false;
 	
@@ -2300,6 +2615,8 @@ bool ext2_fsck(const char * _name) {
 	 * here as they doesn't need free()ing as well.
 	 */
 	sc->gdt=NULL;
+	sc->gdtv1=NULL;
+	sc->gdtv2=NULL;
 	sc->inode_table=NULL;
 	sc->cam_lock=NULL;
 	sc->progress_bar=NULL;
@@ -2316,8 +2633,10 @@ bool ext2_fsck(const char * _name) {
 	sc->comc.compr=NULL;
 #endif // #ifdef COMC_IN_MEMORY
 	
+#ifdef BTCLONE
 	void * com_cache_thread_stack_memory=NULL;
 	void * ext2_read_tables_stack_memory=NULL;
+#endif // #ifdef BTCLONE
 	
 	sc->bdev=bdev_lookup_bdev(sc->name=_name);
 	if (!sc->bdev) {
@@ -2368,9 +2687,41 @@ found_superblock:
 	
 	eprintf("Pass 1b: Read and check group descriptor table ...\n");
 	
-	sc->size_of_gdt_Blocks=(sc->num_groups*sizeof(*sc->gdt)+sc->block_size-1)/sc->block_size;
+	switch (sc->sb->group_descriptor_table_entry_size) {
+		case 32: {
+			eprintf("Detected old 32 byte group descriptor table format with group_descriptor_table_entry_size == 32.\n");
+		case_32: ;
+			sc->size_of_gdt_Blocks=(sc->num_groups*sizeof(*sc->gdtv1)+sc->block_size-1)/sc->block_size;
+			MALLOCBYTES(sc->gdtv1,sc->size_of_gdt_Blocks*sc->block_size);
+			break;
+		}
+		
+		case 64: {
+			eprintf("Detected new 64 byte group descriptor table format with group_descriptor_table_entry_size == 64.\n");
+		case_64: ;
+			sc->size_of_gdt_Blocks=(sc->num_groups*sizeof(*sc->gdtv2)+sc->block_size-1)/sc->block_size;
+			MALLOCBYTES(sc->gdtv2,sc->size_of_gdt_Blocks*sc->block_size);
+			break;
+		}
+		
+		case 0: {
+			if (sc->sb->in_compat & IN_COMPAT_64BIT) {
+				eprintf("Detected new 64 byte group descriptor table format, but group_descriptor_table_entry_size == 0!\n");
+				goto case_64;
+			} else {
+				eprintf("Detected old 32 byte group descriptor table format with group_descriptor_table_entry_size == 0!\n");
+				goto case_32;
+			}
+			/* fall through */
+		}
+		
+		default: {
+			eprintf("Unknown group descriptor entry size %u (supported are 32 and 64)\n",sc->sb->group_descriptor_table_entry_size);
+			goto cleanup;
+		}
+	}
 	
-	MALLOCBYTES(sc->gdt,sc->size_of_gdt_Blocks*sc->block_size);
+	MALLOCBYTES(sc->gdt,sc->num_groups * sizeof(*sc->gdt));
 	
 	sc->group_size_Blocks=(block_t)sc->sb->clusters_per_group*(block_t)sc->cluster_size_Blocks;
 	eprintf(
@@ -2407,7 +2758,7 @@ found_superblock:
 				)
 			)*sc->cluster_size_Blocks;
 			
-			if (sc->size_of_gdt_Blocks==bdev_read(sc->bdev,sb_offset,sc->size_of_gdt_Blocks,(void*)sc->gdt)) {
+			if (sc->size_of_gdt_Blocks==bdev_read(sc->bdev,sb_offset,sc->size_of_gdt_Blocks,sc->gdtv1?(void*)sc->gdtv1:(void*)sc->gdtv2)) {
 				have_gdt=true;
 				break;
 			}
@@ -2424,7 +2775,11 @@ found_superblock:
 		return 2;
 	}
 	
-	endian_swap_gdt(sc->gdt,sc->num_groups);
+	if (sc->gdtv1) {
+		gdt_disk2memory_v1(sc->gdt,sc->gdtv1,sc->num_groups);
+	} else {
+		gdt_disk2memory_v2(sc->gdt,sc->gdtv2,sc->num_groups);
+	}
 	
 #define NUM_ZIND 12 // zero    indirect -> direct
 	
@@ -2443,26 +2798,25 @@ found_superblock:
 	
 	eprintf("size_of_gdt_Bytes=%llu\n",(unsigned long long)sc->num_groups*sizeof(*sc->gdt));
 	
-	/*
-	 * We swap here the gdt again, so we don't need to swap all backup 
-	 * versions while we read them. Howewer, we have to reswap all over 
-	 * again after the loop, of course.
-	 */
-	endian_swap_gdt(sc->gdt,sc->num_groups);
-	
 	{
-		struct super_block * sb2;
 		MALLOC1(sb2);
-		struct group_desciptor * gdt2;
-		MALLOCBYTES(gdt2,sc->size_of_gdt_Blocks*sc->block_size);
-		eprintf("malloc(gdt2)=%p\n",(void*)gdt2);
+		
+		if (sc->gdtv1) {
+			MALLOCBYTES(gdt2v1,sc->size_of_gdt_Blocks*sc->block_size);
+			eprintf("malloc(gdt2v1)=%p\n",(void*)gdt2v1);
+		} else {
+			MALLOCBYTES(gdt2v2,sc->size_of_gdt_Blocks*sc->block_size);
+			eprintf("malloc(gdt2v2)=%p\n",(void*)gdt2v2);
+		}
+		MALLOCBYTES(gdt2im,sc->num_groups * sizeof(*gdt2im));
+		
 		/*
 		int fd;
 		fd=open("/ramfs/gdt.0.img",O_WRONLY|O_CREAT|O_TRUNC,0666);
 		write(fd,sc->gdt,sc->num_groups*sizeof(*sc->gdt));
 		close(fd);
 		*/
-		for (unsigned group=1;group<sc->num_groups;++group) {
+		for (unsigned long group=1;group<sc->num_groups;++group) {
 			if (group_has_super_block(sc->sb,group)) {
 				block_t sb_offset;
 				
@@ -2510,12 +2864,40 @@ found_superblock:
 				sb2->ro_compat|=(sc->sb->ro_compat&RO_COMPAT_LARGE_FILE);
 				sb2->last_orphanded_inode|=sc->sb->last_orphanded_inode;
 				
-#define CMP32(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup copy is %lu, should be %lu\n",#v,(unsigned long)sb2->v,(unsigned long)sc->sb->v);
-#define CMP16(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup copy is %lu, should be %lu\n",#v,(unsigned long)sb2->v,(unsigned long)sc->sb->v);
-#define CMP08(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup copy is %lu, should be %lu\n",#v,(unsigned long)sb2->v,(unsigned long)sc->sb->v);
-#define CMP32n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup copy is %lu, should be %lu\n",#v,i,(unsigned long)sb2->v[i],(unsigned long)sc->sb->v[i]); } } while (0)
-#define CMP16n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup copy is %lu, should be %lu\n",#v,i,(unsigned long)sb2->v[i],(unsigned long)sc->sb->v[i]); } } while (0)
-#define CMP08n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup copy is %lu, should be %lu\n",#v,i,(unsigned long)sb2->v[i],(unsigned long)sc->sb->v[i]); } } while (0)
+#define CMP64(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup super block is %llu, should be %llu\n",#v,u64_to_ull(&sb2->v),u64_to_ull(&sc->sb->v));
+#define CMP32(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup super block is %lu, should be %lu\n",#v,u32_to_ul(&sb2->v),u32_to_ul(&sc->sb->v));
+#define CMP16(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup super block is %u, should be %u\n",#v,u16_to_u(&sb2->v),u16_to_u(&sc->sb->v));
+#define CMP08(v) if (sb2->v!=sc->sb->v) eprintf("%s in backup super block is %u, should be %u\n",#v,u08_to_u(&sb2->v),u08_to_u(&sc->sb->v));
+#define CMP32n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup super block is %lu, should be %lu\n",#v,i,u32_to_ul(sb2->v+i),u32_to_ul(sc->sb->v+i)); } } while (0)
+#define CMP16n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup super block is %u, should be %u\n",#v,i,u16_to_u(sb2->v+i),u16_to_u(sc->sb->v+i)); } } while (0)
+#define CMP08n(v,n) do { for (int i=0;i<n;++i) { if (sb2->v[i]!=sc->sb->v[i]) eprintf("%s[%i] in backup super block is %u, should be %u\n",#v,i,u08_to_u(sb2->v+i),u08_to_u(sc->sb->v+i)); } } while (0)
+#define CMPCn(v,n) do { \
+	bool differs=false; \
+	 \
+	for (int i=0;i<n;++i) { \
+		if (sb2->v[i]!=sc->sb->v[i]) { \
+			eprintf( \
+				"%s[%i] in backup super block is '%c' (%u), should be '%c' (%u)\n" \
+				,#v \
+				,i \
+				,sb2->v[i] \
+				,sb2->v[i] \
+				,sc->sb->v[i] \
+				,sc->sb->v[i] \
+			); \
+			differs=true; \
+		} \
+	} \
+	 \
+	if (differs && strcmp(sb2->v,sc->sb->v)) { \
+		eprintf( \
+			"%s in backup super block is \"%s\", should be \"%s\"\n" \
+			,#v \
+			,sb2->v \
+			,sc->sb->v \
+		); \
+	} \
+} while (0)
 				
 				CMP32(num_inodes);
 				CMP32(num_clusters);
@@ -2549,8 +2931,8 @@ found_superblock:
 				CMP32(in_compat);
 				CMP32(ro_compat);
 				CMP08n(uuid,16);
-				CMP08n(volume_name,16);
-				CMP08n(last_mount_point,64);
+				CMPCn(volume_name,16);
+				CMPCn(last_mount_point,64);
 				CMP32(e2compr_algorithm_usage_bitmap);
 				CMP08(num_blocks_to_prealloc);
 				CMP08(num_blocks_to_prealloc4dirs);
@@ -2561,27 +2943,103 @@ found_superblock:
 				CMP32(last_orphanded_inode);
 				CMP32n(hash_seed,4);
 				CMP08(def_hash_version);
-				CMP08(reserved_char_pad);
-				CMP16(reserved_word_pad);
+				CMP08(jnl_backup_type);
+				CMP16(group_descriptor_table_entry_size);
 				CMP32(default_mount_opts);
 				CMP32(first_meta_bg);
-				CMP32n(reserved,62);
+				CMP32(mkfs_time);
+				CMP32n(jnl_blocks,17);
+				CMP32(blocks_count_hi);
+				CMP32(r_blocks_count_hi);
+				CMP32(free_blocks_count_hi);
+				CMP16(min_extra_isize);
+				CMP16(want_extra_isize);
+				CMP32(flags);
+				CMP16(raid_stride);
+				CMP16(mmp_update_interval);
+				CMP64(mmp_block);
+				CMP32(raid_stripe_width);
+				CMP08(log_groups_per_flex);
+				CMP08(checksum_type);
+				CMP16(reserved_pad);
+				CMP64(kbytes_written);
+				CMP32(snapshot_inum);
+				CMP32(snapshot_id);
+				CMP64(snapshot_r_blocks_count);
+				CMP32(snapshot_list);
+				CMP32(error_count);
+				CMP32(first_error_time);
+				CMP32(first_error_ino);
+				CMP64(first_error_block);
+				CMP08n(first_error_func,32);
+				CMP32(first_error_line);
+				CMP32(last_error_time);
+				CMP32(last_error_ino);
+				CMP32(last_error_line);
+				CMP64(last_error_block);
+				CMP08n(last_error_func,32);
+				
+				CMP08n(mount_opts,64);
+				CMP32(usr_quota_inum);
+				CMP32(grp_quota_inum);
+				CMP32(overhead_clusters);
+				CMP32n(reserved,108);
+				CMP32(checksum);
+#undef CMP64
+#undef CMP32
+#undef CMP16
+#undef CMP08
+#undef CMP32n
+#undef CMP16n
+#undef CMP08n
+#undef CMPCn
 				
 				if (memcmp(sc->sb,sb2,sc->block_size)) {
 					NOTIFYF(
-						"%s: Super blocks of groups 0 and %u differ"
+						"%s: Super blocks of groups 0 and %lu differ"
 						,sc->name
 						,group
 					);
 				}
 				// assert(!memcmp(sc->sb,sb2,sc->block_size));
 				
+#define CMP64(v) if (gdt2im[g].v != sc->gdt[g].v) { diff = true; eprintf("%s in backup group descriptor table %lu at index %lu is %llu, should be %llu\n",#v,group,g,u64_to_ull(&gdt2im[g].v),u64_to_ull(&sc->gdt[g].v)); }
+#define CMP32(v) if (gdt2im[g].v != sc->gdt[g].v) { diff = true; eprintf("%s in backup group descriptor table %lu at index %lu is %lu, should be %lu\n",#v,group,g,u32_to_ul(&gdt2im[g].v),u32_to_ul(&sc->gdt[g].v)); }
+#define CMP16(v) if (gdt2im[g].v != sc->gdt[g].v) { diff = true; eprintf("%s in backup group descriptor table %lu at index %lu is %u, should be %u\n",#v,group,g,u16_to_u(&gdt2im[g].v),u16_to_u(&sc->gdt[g].v)); }
+				
 				if (1) { // Deactivate for VALGRIND if you like
-					if (sc->size_of_gdt_Blocks!=bdev_read(sc->bdev,(sb_offset/sc->cluster_size_Blocks+1)*sc->cluster_size_Blocks,sc->size_of_gdt_Blocks,(void*)gdt2)) {
+					if (sc->size_of_gdt_Blocks!=bdev_read(sc->bdev,(sb_offset/sc->cluster_size_Blocks+1)*sc->cluster_size_Blocks,sc->size_of_gdt_Blocks,sc->gdtv1?(void*)gdt2v1:(void*)gdt2v2)) {
 						eprintf("\033[31m");
-						ERRORF("%s: Couldn't read group descriptor table of group %u: %s.",sc->name,group,strerror(errno));
+						ERRORF("%s: Couldn't read group descriptor table of group %lu: %s.",sc->name,group,strerror(errno));
 						eprintf("\033[0m");
 					} else {
+						if (sc->gdtv1) {
+							gdt_disk2memory_v1(gdt2im,gdt2v1,sc->num_groups);
+						} else {
+							gdt_disk2memory_v2(gdt2im,gdt2v2,sc->num_groups);
+						}
+						bool diff = false;
+						for (unsigned long g=0;g<sc->num_groups;++g) {
+							CMP64(cluster_allocation_map);
+							CMP64(inode_allocation_map);
+							CMP64(inode_table);
+							CMP64(snapshot_exclude_bitmap);
+							// CMP32(num_free_clusters);
+							// CMP32(num_free_inodes);
+							// CMP32(num_directories);
+							CMP32(cluster_allocation_map_csum);
+							CMP32(inode_allocation_map_csum);
+							// CMP32(num_virgin_inodes);
+							CMP32(reserved);
+							// CMP16(csum);
+							// FIXME: Check csum based on actual group descriptor data
+							// The group descriptor table backups only contain bogus flags. So, ignore this field completely here.
+							// CMP16(flags);
+						}
+#undef CMP64
+#undef CMP32
+#undef CMP16
+						
 						/*
 						char * tmp;
 						fd=open(tmp=mprintf("/ramfs/%s.gdt.%03u.img",sc->name,group),O_WRONLY|O_CREAT|O_TRUNC,0666);
@@ -2590,22 +3048,17 @@ found_superblock:
 						free(tmp);
 						*/
 						
-						for (unsigned g=0;g<sc->num_groups;++g) {
-							gdt2[g].num_free_clusters=sc->gdt[g].num_free_clusters;
-							gdt2[g].num_free_inodes=sc->gdt[g].num_free_inodes;
-							gdt2[g].num_directories=sc->gdt[g].num_directories;
-						}
-						if (memcmp(sc->gdt,gdt2,sc->num_groups*sizeof(*sc->gdt))) {
-							ERRORF("%s: Group descriptor tables of groups 0 and %u differ",sc->name,group);
+						if (diff) {
+							ERRORF("%s: Group descriptor tables of groups 0 and %lu differ",sc->name,group);
 						}
 					}
 				}
 			}
 		}
-		free(gdt2);
-		eprintf("free(gdt2 (%p))\n",(void*)gdt2);
-		gdt2=NULL;
-		free(sb2);
+		free(gdt2v1); gdt2v1=NULL;
+		free(gdt2v2); gdt2v2=NULL;
+		free(gdt2im); gdt2im=NULL;
+		free(sb2); sb2=NULL;
 		
 #if 0
 		for (unsigned group=0;group<sc->num_groups;++group) {
@@ -2622,8 +3075,6 @@ found_superblock:
 		}
 #endif // #if 0
 	}
-	
-	endian_swap_gdt(sc->gdt,sc->num_groups);
 	
 recheck_compat_flags:
 	if (sc->sb->log_frag_size!=sc->sb->log_cluster_size) {
@@ -2714,13 +3165,6 @@ recheck_compat_flags:
 				,sc->name
 			);
 		}
-		
-		if (sc->sb->rw_compat&RW_COMPAT_UNKNOWN
-		||  sc->sb->ro_compat&RO_COMPAT_UNKNOWN
-		||  sc->sb->in_compat&IN_COMPAT_UNKNOWN) {
-			ERRORF("%s: This file system uses unknown features.",sc->name);
-			return false;
-		}
 	} else {
 		sc->sb->inode_size=128;
 		sc->sb->first_inode=11;
@@ -2789,29 +3233,122 @@ recheck_compat_flags:
 	// 	num_free_clusers
 	// 	num_free_inodes
 */
+	unsigned flags_tested=0;
+#define IF(flags, flag) flags_tested |= flag; if (flags & flag)
 	
-	if (sc->sb->rw_compat&RW_COMPAT_IMAGIC_INODES) {
-		ERRORF("%s: This file system has the RW compatible feature flag IMAGIC_INODES set which I don't know how to handle.",sc->name);
-		return false;
-	}
-	if (sc->sb->rw_compat&RW_COMPAT_EXT_ATTR) {
-		ERRORF("%s: This file system has the RW compatible feature flag EXT_ATTR set which I don't know how to handle.",sc->name);
-		return false;
+	IF (sc->sb->rw_compat, RW_COMPAT_DIR_PREALLOC) {
+		NOTIFYF("%s: This file system has the RW compatible feature flag DIR_PREALLOC set which is currently not supported.",sc->name);
 	}
 	
-	if (sc->sb->ro_compat&RO_COMPAT_BTREE_DIR) {
-		ERRORF("%s: This file system has the RO compatible feature flag BTREE_DIR set which I don't know how to handle.",sc->name);
-		return false;
+	IF (sc->sb->rw_compat, RW_COMPAT_IMAGIC_INODES) {
+		NOTIFYF("%s: This file system has the RW compatible feature flag IMAGIC_INODES set which is currently not supported.",sc->name);
 	}
 	
-	if (sc->sb->in_compat&IN_COMPAT_COMPRESSION) {
-		ERRORF("%s: This file system has the IN compatible feature flag COMPRESSION set which I don't know how to handle.",sc->name);
-		return false;
+	IF (sc->sb->rw_compat, RW_COMPAT_HAS_JOURNAL) {
+		NOTIFYF("%s: This file system has the RW compatible feature flag HAS_JOURNAL set.",sc->name);
+		if (sc->sb->journal_inode) {
+			INFOF("%s: Journal inode is %lu",sc->name,(unsigned long)sc->sb->journal_inode);
+		} else {
+			INFOF("%s: Journal inode is not known in super block (will have to search \"/.journal\" later).",sc->name);
+		}
 	}
-	if (sc->sb->in_compat&IN_COMPAT_RECOVER) {
+	
+	IF (sc->sb->rw_compat, RW_COMPAT_EXT_ATTR) {
+		NOTIFYF("%s: This file system has the RW compatible feature flag EXT_ATTR set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->rw_compat, RW_COMPAT_RESIZE_INODE) {
+		NOTIFYF("%s: This file system has the RW compatible feature flag RESIZE_INODE set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->rw_compat, RW_COMPAT_DIR_INDEX) {
+		NOTIFYF("%s: This file system has the RW compatible feature flag DIR_INDEX set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_0040) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_0040 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_0080) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_0080 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_0100) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_0100 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_0200) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_0200 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_0400) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_0400 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_0800) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_0800 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_1000) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_1000 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_2000) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_2000 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_4000) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_4000 set.",sc->name);
+	IF (sc->sb->rw_compat, RW_COMPAT_UNKNOWN_8000) NOTIFYF("%s: This file system has the RW compatible feature flag UNKNOWN_8000 set.",sc->name);
+	
+	assert(flags_tested == 0xffff);
+	flags_tested = 0;
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_SPARSE_SUPER) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag SPARSE_SUPER set.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_LARGE_FILE) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag LARGE_FILE set.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_BTREE_DIR) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag BTREE_DIR set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_HUGE_FILE) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag HUGE_FILE set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_GDT_CSUM) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag GDT_CSUM set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_DIR_NLINK) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag DIR_NLINK set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_EXTRA_ISIZE) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag EXTRA_ISIZE set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_RESERVED_0080) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag RESERVED_0080 set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_QUOTA) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag QUOTA set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_BIGALLOC) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag BIGALLOC set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_METADATA_CSUM) {
+		NOTIFYF("%s: This file system has the RO compatible feature flag METADATA_CSUM set which is currently not supported.",sc->name);
+	}
+	
+	if (sc->sb->ro_compat & RO_COMPAT_GDT_CSUM 
+	&&  sc->sb->ro_compat & RO_COMPAT_METADATA_CSUM) {
+		ERRORF("%s: This file system has set both, GDT_CSUM and METADATA_CSUM set.",sc->name);
+	}
+	
+	IF (sc->sb->ro_compat, RO_COMPAT_UNKNOWN_0800) { NOTIFYF("%s: This file system has the RO compatible feature flag UNKNOWN_0800 set.",sc->name); }
+	IF (sc->sb->ro_compat, RO_COMPAT_UNKNOWN_1000) { NOTIFYF("%s: This file system has the RO compatible feature flag UNKNOWN_1000 set.",sc->name); }
+	IF (sc->sb->ro_compat, RO_COMPAT_UNKNOWN_2000) { NOTIFYF("%s: This file system has the RO compatible feature flag UNKNOWN_2000 set.",sc->name); }
+	IF (sc->sb->ro_compat, RO_COMPAT_UNKNOWN_4000) { NOTIFYF("%s: This file system has the RO compatible feature flag UNKNOWN_4000 set.",sc->name); }
+	IF (sc->sb->ro_compat, RO_COMPAT_UNKNOWN_8000) { NOTIFYF("%s: This file system has the RO compatible feature flag UNKNOWN_8000 set.",sc->name); }
+	
+	assert(flags_tested == 0xffff);
+	flags_tested = 0;
+	
+	IF (sc->sb->in_compat, IN_COMPAT_COMPRESSION) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag COMPRESSION set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_FILETYPE) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag FILETYPE set.",sc->name);
+	}
+		
+	IF (sc->sb->in_compat, IN_COMPAT_RECOVER) {
 		if (sc->sb->rw_compat&RW_COMPAT_HAS_JOURNAL) {
-			ERRORF("%s: This file system contains a journal AND NEEDS RECOVERY, which I don't know how to handle. I'm going to ignore the journal and remove the 'needs recovery flag' after having the file system's errors fixed.",sc->name);
-			sc->sb->ro_compat&=~IN_COMPAT_RECOVER;
+			ERRORF("%s: This file system contains a journal AND NEEDS RECOVERY which is currently not supported. I'm going to ignore the journal and remove the 'needs recovery flag' after having the file system's errors fixed.",sc->name);
+			sc->sb->ro_compat &= ~IN_COMPAT_RECOVER;
 		} else {
 			eprintf("%s: This file system is marked to not contain a journal, but needing recovery.",sc->name);
 			eprintf("%s: <j> Fix by marking this file system to contain a journal.",sc->name);
@@ -2825,12 +3362,12 @@ recheck_compat_flags:
 			switch (answer) {
 				case 'j':
 					printf("This file system is marked to not contain a journal, but needing recovery. Fixed by marking file system containing a journal.\n"); fflush(stdout);
-					sc->sb->rw_compat&=~RW_COMPAT_HAS_JOURNAL;
+					sc->sb->rw_compat |= RW_COMPAT_HAS_JOURNAL;
 					write_super_blocks(sc->sb);
 					goto recheck_compat_flags;
 				case 'r':
 					printf("This file system is marked to not contain a journal, but needing recovery. Fixed by marking file system not needing recovery.\n"); fflush(stdout);
-					sc->sb->ro_compat&=~IN_COMPAT_RECOVER;
+					sc->sb->ro_compat &= ~IN_COMPAT_RECOVER;
 					break;
 				case 'q':
 					printf("This file system is marked to not contain a journal, but needing recovery. Not fixed.\n"); fflush(stdout);
@@ -2840,40 +3377,64 @@ recheck_compat_flags:
 			}
 		}
 	}
-	if (sc->sb->in_compat&IN_COMPAT_JOURNAL_DEV) {
-		ERRORF("%s: This file system has the IN compatible feature flag JOURNAL_DEV set (external journal) which I currently don't handle.",sc->name);
-		return false;
-	}
-/*
-	if (sc->sb->rw_compat&RW_COMPAT_HAS_JOURNAL) {
-		INFOF("%s: Journal inode is %lu",sc->name,(unsigned long)sc->sb->journal_inode);
-	}
-*/
-	if (sc->sb->in_compat&IN_COMPAT_META_BG) {
-		ERRORF("%s: This file system has the IN compatible feature flag META_BG set which I don't know how to handle.",sc->name);
-		return false;
+	
+	IF (sc->sb->in_compat, IN_COMPAT_JOURNAL_DEV) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag JOURNAL_DEV set (external journal) which is currently not supported.",sc->name);
+		sc->sb->ro_compat &= ~IN_COMPAT_RECOVER;
+		sc->sb->rw_compat &= ~RW_COMPAT_HAS_JOURNAL;
+		goto recheck_compat_flags;
 	}
 	
-	if (sc->sb->rw_compat&RW_COMPAT_RESIZE_INODE) {
-		NOTIFYF("%s: This file system has the RW compatible feature flag RESIZE_INODE set.",sc->name);
-	}
-	if (sc->sb->rw_compat&RW_COMPAT_DIR_INDEX) {
-		NOTIFYF("%s: This file system has the RW compatible feature flag DIR_INDEX set.",sc->name);
-	}
-	if (sc->sb->rw_compat&RW_COMPAT_HAS_JOURNAL) {
-		NOTIFYF("%s: This file system has the RW compatible feature flag HAS_JOURNAL set.",sc->name);
+	IF (sc->sb->in_compat, IN_COMPAT_META_BG) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag META_BG set which is currently not supported.",sc->name);
 	}
 	
-	if (sc->sb->ro_compat&RO_COMPAT_SPARSE_SUPER) {
-		NOTIFYF("%s: This file system has the RO compatible feature flag SPARSE_SUPER set.",sc->name);
-	}
-	if (sc->sb->ro_compat&RO_COMPAT_LARGE_FILE) {
-		NOTIFYF("%s: This file system has the RO compatible feature flag LARGE_FILE set.",sc->name);
+	IF (sc->sb->in_compat, IN_COMPAT_RESERVED_0080) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag RESERVED_0080 set which is currently not supported.",sc->name);
 	}
 	
-	if (sc->sb->in_compat&IN_COMPAT_FILETYPE) {
-		NOTIFYF("%s: This file system has the IN compatible feature flag FILETYPE set.",sc->name);
+	IF (sc->sb->in_compat, IN_COMPAT_EXTENTS) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag EXTENTS set.",sc->name);
 	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_64BIT) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag 64BIT set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_MMP) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag MMP set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_FLEX_BG) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag FLEX_BG set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_EA_INODE) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag EA_INODE set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_RESERVED_0800) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag RESERVED_0800 set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_DIRDATA) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag DIRDATA set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_BG_USE_META_CSUM) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag BG_USE_META_CSUM set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_LARGEDIR) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag LARGEDIR set which is currently not supported.",sc->name);
+	}
+	
+	IF (sc->sb->in_compat, IN_COMPAT_INLINEDATA) {
+		NOTIFYF("%s: This file system has the IN compatible feature flag INLINEDATA set which is currently not supported.",sc->name);
+	}
+	
+	assert(flags_tested == 0xffff);
+#undef IF
 	
 	if (sc->sb->wtime>(u32)time(NULL)) {
 		NOTIFYF("%s: This file system has wtime in future relative to system time",sc->name);
@@ -2909,7 +3470,7 @@ recheck_compat_flags:
 	{
 		int fd=open("/ramfs/inode_table",O_RDWR|O_CREAT|O_TRUNC,0600);
 		if (fd<0) {
-			eprintf("Oops, couldn't open/create file /ramfs/inode_table: %s",strerror(errno));
+			eprintf("main-thread: OOPS: Couldn't open/create file /ramfs/inode_table: %s",strerror(errno));
 			exit(2);
 		}
 		inode_table_len=sizeof(*sc->inode_table);
@@ -2921,18 +3482,18 @@ recheck_compat_flags:
 		}
 		--inode_table_len;
 		if (inode_table_len!=lseek(fd,inode_table_len,SEEK_SET)) {
-			eprintf("Couldn't seek in file /ramfs/inode_table: %s",strerror(errno));
+			eprintf("main-thread: OOPS: Couldn't seek in file /ramfs/inode_table: %s",strerror(errno));
 			exit(2);
 		}
 		if (1!=write(fd,&inode_table_len,1)) {
-			eprintf("Couldn't write one byte to file /ramfs/inode_table: %s",strerror(errno));
+			eprintf("main-thread: OOPS: Couldn't write one byte to file /ramfs/inode_table: %s",strerror(errno));
 			exit(2);
 		}
 		++inode_table_len;
 //		sc->inode_table=mmap(NULL,inode_table_len,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
 		sc->inode_table=mmap(NULL,inode_table_len,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
 		if (sc->inode_table==MAP_FAILED) {
-			eprintf("Couldn't mmap file /ramfs/inode_table: %s",strerror(errno));
+			eprintf("main-thread: OOPS: Couldn't mmap file /ramfs/inode_table: %s",strerror(errno));
 			exit(2);
 		}
 	}
@@ -3118,7 +3679,7 @@ recheck_compat_flags:
 			(void *)sc
 		)) {
 #endif // #ifdef BTCLONE, else
-			eprintf("clone failed, we can't proceed!");
+			eprintf("main-thread: OOPS: clone failed, we can't proceed!");
 			exit(2);
 		}
 	}
@@ -3479,6 +4040,8 @@ cleanup:
 		free(sc->inode_link_count);
 		free(sc->inode_type_str);
 		free(sc->gdt);
+		free(sc->gdtv1);
+		free(sc->gdtv2);
 //		free(sc->inode_table);
 		munmap(sc->inode_table,inode_table_len);
 		free(sc->cam_lock);
@@ -3514,6 +4077,10 @@ cleanup:
 		free(sc->comc.ccgroup);
 		btlock_lock_free(sc->comc.debug_lock);
 		free(sc);
+		free(sb2);
+		free(gdt2v1);
+		free(gdt2v2);
+		free(gdt2im);
 #ifdef BTCLONE
 		free(com_cache_thread_stack_memory);
 		free(ext2_read_tables_stack_memory);
