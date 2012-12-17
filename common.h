@@ -7,18 +7,30 @@
 #include <stdio.h>
 #include <string.h>
 
+#define FMT(fmt, ...) do { \
+	char * msg = mprintf(fmt, __VA_ARGS__); \
+	if (!msg) { \
+		eprintf(fmt, __VA_ARGS__); \
+		eprintf("\n"); \
+	} else { \
+		eprintf("%s\n", msg); \
+		free(msg); \
+	} \
+} while (0)
+
 #define WARNING(x)        do { eprintf("%s\n",x); } while (0)
-#define WARNINGF(fmt,...) do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); } while (0)
+#define WARNINGF(fmt,...) FMT(fmt, __VA_ARGS__)
 #define ERROR(x)          do { eprintf("%s\n",x); } while (0)
-#define ERRORF(fmt,...)   do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); } while (0)
+#define ERRORF(fmt,...)   FMT(fmt, __VA_ARGS__)
+// do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); } while (0)
 #define NOTIFY(x)         do { eprintf("%s\n",x); } while (0)
-#define NOTIFYF(fmt,...)  do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); } while (0)
+#define NOTIFYF(fmt,...)  FMT(fmt, __VA_ARGS__)
 #define DEBUG(x)          do { eprintf("%s\n",x); } while (0)
-#define DEBUGF(fmt,...)   do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); } while (0)
+#define DEBUGF(fmt,...)   FMT(fmt, __VA_ARGS__)
 #define INFO(x)           do { eprintf("%s\n",x); } while (0)
-#define INFOF(fmt,...)    do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); } while (0)
+#define INFOF(fmt,...)    FMT(fmt, __VA_ARGS__)
 #define FATAL(x)          do { eprintf("%s\n",x); abort(); } while (0)
-#define FATALF(fmt,...)   do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); abort(); } while (0)
+#define FATALF(fmt,...)   FMT(fmt, __VA_ARGS__)
 
 bool args_split(const char * args,int * _argc,char * * * _argv);
 char * mkhrtime(bttime_t t);
