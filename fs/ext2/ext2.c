@@ -1933,7 +1933,7 @@ skip_dir:
 //		isc->ok=false;
 	}
 	
-	if (isc->inode->size<isc->used_clusters+isc->holes) {
+	if (isc->inode->size < isc->used_clusters + isc->holes && !(isc->inode->flags & INOF_EOFBLOCKS)) {
 		ERRORF("%s: Inode %lu [%s]: size < position addressed by highest allocated cluster",isc->sc->name,isc->inode_num,isc->type);
 //		isc->ok=false;
 	}
