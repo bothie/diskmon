@@ -2379,53 +2379,49 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 	}
 	
 	if (isc->inode->flags&INOF_HUGE_FILE) {
-		NOTIFYF("%s: Inode %lu [%s] has unsupported flag HUGE_FILE set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has unsupported flag HUGE_FILE set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	// Proper handling of INOF_EXTENTS is established
 	
 	if (isc->inode->flags&INOF_RESERVED_00100000) {
-		NOTIFYF("%s: Inode %lu [%s] has unsupported flag RESERVED_00100000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has unsupported flag RESERVED_00100000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_EA_INODE) {
-		NOTIFYF("%s: Inode %lu [%s] has unsupported flag EA_INODE set.\n",isc->sc->name,isc->inode_num,isc->type);
-	}
-	
-	if (isc->inode->flags&INOF_EOFBLOCKS) {
-		NOTIFYF("%s: Inode %lu [%s] has unsupported flag EOFBLOCKS set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has unsupported flag EA_INODE set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_00800000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_00800000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_00800000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_01000000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_01000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_01000000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_02000000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_02000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_02000000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_04000000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_04000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_04000000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_08000000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_08000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_08000000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_10000000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_10000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_10000000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_20000000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_20000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_20000000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	if (isc->inode->flags&INOF_UNKNOWN_40000000) {
-		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_40000000 set.\n",isc->sc->name,isc->inode_num,isc->type);
+		NOTIFYF("%s: Inode %lu [%s] has flag UNKNOWN_40000000 set.",isc->sc->name,isc->inode_num,isc->type);
 	}
 	
 	// We ignore INOF_TOOLCHAIN completely
