@@ -11,25 +11,40 @@
 	char * msg = mprintf(fmt, __VA_ARGS__); \
 	if (!msg) { \
 		eprintf(fmt, __VA_ARGS__); \
-		eprintf("\n"); \
+		if (fmt[strlen(fmt)-1] != '\n') { \
+			eprintf("\n"); \
+		} \
 	} else { \
-		eprintf("%s\n", msg); \
+		if (msg[strlen(msg)-1] != '\n') { \
+			eprintf("%s\n", msg); \
+		} else { \
+			eprintf("%s", msg); \
+		} \
 		free(msg); \
 	} \
 } while (0)
 
-#define WARNING(x)        do { eprintf("%s\n",x); } while (0)
+#define JUSTPRINT(_x) do { \
+	char * x = (_x); \
+	 \
+	if (x[strlen(x)-1] != '\n') { \
+		eprintf("%s\n",x); \
+	} else { \
+		eprintf("%s",x); \
+	} \
+} while (0)
+
+#define WARNING(x)        JUSTPRINT(x)
 #define WARNINGF(fmt,...) FMT(fmt, __VA_ARGS__)
-#define ERROR(x)          do { eprintf("%s\n",x); } while (0)
+#define ERROR(x)          JUSTPRINT(x)
 #define ERRORF(fmt,...)   FMT(fmt, __VA_ARGS__)
-// do { eprintf(fmt,__VA_ARGS__); eprintf("\n"); } while (0)
-#define NOTIFY(x)         do { eprintf("%s\n",x); } while (0)
+#define NOTIFY(x)         JUSTPRINT(x)
 #define NOTIFYF(fmt,...)  FMT(fmt, __VA_ARGS__)
-#define DEBUG(x)          do { eprintf("%s\n",x); } while (0)
+#define DEBUG(x)          JUSTPRINT(x)
 #define DEBUGF(fmt,...)   FMT(fmt, __VA_ARGS__)
-#define INFO(x)           do { eprintf("%s\n",x); } while (0)
+#define INFO(x)           JUSTPRINT(x)
 #define INFOF(fmt,...)    FMT(fmt, __VA_ARGS__)
-#define FATAL(x)          do { eprintf("%s\n",x); abort(); } while (0)
+#define FATAL(x)          JUSTPRINT(x)
 #define FATALF(fmt,...)   FMT(fmt, __VA_ARGS__)
 
 bool args_split(const char * args,int * _argc,char * * * _argv);
