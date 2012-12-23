@@ -995,11 +995,11 @@ bool read_table_for_one_group(struct scan_context * sc) {
 		}
 	}
 	
-	atomic_inc(&sc->prereaded);
-	
 //	if (!sc->background) {
 		process_table_for_group(sc->table_reader_group,sc);
 //	}
+	
+	atomic_inc(&sc->prereaded);
 	
 	return true;
 }
