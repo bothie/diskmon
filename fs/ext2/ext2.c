@@ -2798,8 +2798,6 @@ found_superblock:
 		}
 	}
 	
-#define NUM_ZIND 12 // zero    indirect -> direct
-	
 	eprintf("%s: Cluster groups with copies of super block and group descriptor table:",sc->name);
 	
 	{
