@@ -841,13 +841,15 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	block_t ib_s=sc->cluster_size_Blocks;
 	block_t it_s=sc->cluster_size_Blocks*((it_n+sc->cluster_size_Bytes-1)/sc->cluster_size_Bytes);
 	
-	if (cb_s!=bdev_read(sc->bdev,cb_a,cb_s,cb_b)) {
+	if (sc->gdt[sc->table_reader_group].flags & BG_INODE_ALLOCATION_MAP_UNINIT || cb_s != bdev_read(sc->bdev, cb_a, cb_s, cb_b)) {
 		/*
 		 * This error is in no way critical as we don't trust that 
 		 * data anyways, we do this reading only to CHECK wether the 
 		 * data are correct and inform the user if it wasn't.
 		 */
-		NOTIFYF("%s: Error reading cluster allocation map for group %u (ignored, will be recalculated anyways ...)",sc->name,sc->table_reader_group);
+		if (! (sc->gdt[sc->table_reader_group].flags & BG_INODE_ALLOCATION_MAP_UNINIT)) {
+			NOTIFYF("%s: Error reading cluster allocation map for group %u (ignored, will be recalculated anyways ...)",sc->name,sc->table_reader_group);
+		}
 		// For VALGRIND:
 		memset(cb_b,0,cb_n);
 	}
@@ -859,11 +861,13 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	 * mis-use the memory for the inode table here as target buffer for 
 	 * the inode bitmap and then copy over the data to the right location.
 	 */
-	if (ib_s!=bdev_read(sc->bdev,ib_a,ib_s,it_b)) {
+	if (sc->gdt[sc->table_reader_group].flags & BG_CLUSTER_ALLOCATION_MAP_UNINIT || ib_s != bdev_read(sc->bdev, ib_a, ib_s, it_b)) {
 		/*
 		 * Again: Just ignore errors in reading of bitmap blocks.
 		 */
-		NOTIFYF("%s: Error reading inode allocation map for group %u (ignored, will be recalculated anyways ...)",sc->name,sc->table_reader_group);
+		if (! (sc->gdt[sc->table_reader_group].flags & BG_CLUSTER_ALLOCATION_MAP_UNINIT)) {
+			NOTIFYF("%s: Error reading inode allocation map for group %u (ignored, will be recalculated anyways ...)",sc->name,sc->table_reader_group);
+		}
 		// For VALGRIND:
 		memset(ib_b,0,ib_n);
 	} else {
@@ -887,117 +891,119 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	}
 #endif // #if 0
 	
-	/*
-	 * The following implementation solves the problem stated in the 
-	 * FIXME above, however it's a very poor solution and should be 
-	 * replaced by something more sane. However, at least it works ...
-	 */
-	bool have_zero_errors=false;
-	bool have_soft_errors=false;
-	bool have_hard_errors=false;
-	unsigned bs=bdev_get_block_size(sc->bdev);
-	u8 error_bitmap[bs];
-	bool first=true;
-	for (block_t i=0;i<it_s;++i) {
-		block_t r=bdev_read(sc->bdev,it_a,1,it_b);
-//		eprintf("%s->read(%llu,1,%p)=%lli\n",bdev_get_name(sc->bdev),(unsigned long long)it_a,it_b,(int long long)r);
-		if (1!=r) {
-			have_zero_errors=true;
-			r=bdev_short_read(sc->bdev,it_a,1,it_b,error_bitmap);
-//			eprintf("%s->short_read(%llu,1,%p,%p)=%lli\n",bdev_get_name(sc->bdev),(unsigned long long)it_a,it_b,error_bitmap,(int long long)r);
+	if (sc->gdt[sc->table_reader_group].flags & BG_INODE_TABLE_INITIALIZED) {
+		/*
+		 * The following implementation solves the problem stated in the 
+		 * FIXME above, however it's a very poor solution and should be 
+		 * replaced by something more sane. However, at least it works ...
+		 */
+		bool have_zero_errors=false;
+		bool have_soft_errors=false;
+		bool have_hard_errors=false;
+		unsigned bs=bdev_get_block_size(sc->bdev);
+		u8 error_bitmap[bs];
+		bool first=true;
+		for (block_t i=0;i<it_s;++i) {
+			block_t r=bdev_read(sc->bdev,it_a,1,it_b);
+//			eprintf("%s->read(%llu,1,%p)=%lli\n",bdev_get_name(sc->bdev),(unsigned long long)it_a,it_b,(int long long)r);
 			if (1!=r) {
-				have_hard_errors=true;
-				have_soft_errors=true;
-				memset(it_b,0,bs);
-			} else {
-//				struct inode * it=(struct inode *)error_bitmap;
-				int ni=bs/sizeof(struct inode);
-				if (first) {
-					first=false;
-					// eprintf("Errors in fields: ");
-				}
-				for (int i=0;i<ni;++i) {
-					/*
-					eprintf("[it[i].links_count=%u]",it[i].links_count);
-					if (it[i].mode&07777) eprintf("M");
-					if (it[i].uid) eprintf("u");
-					if (it[i].atime) eprintf("a");
-					if (it[i].ctime) eprintf("c");
-					if (it[i].mtime) eprintf("m");
-					if (it[i].dtime) eprintf("d");
-					if (it[i].gid) eprintf("g");
-					if (it[i].links_count) eprintf("l");
-					if (it[i].num_blocks) eprintf("b");
-					if (it[i].flags) eprintf("f");
-					if (it[i].translator) eprintf("t");
-					if (it[i].generation) eprintf("e");
-					if (it[i].mode_high) eprintf("H");
-					if (it[i].uid_high) eprintf("U");
-					if (it[i].gid_high) eprintf("G");
-					if (it[i].author) eprintf("A");
-					if (it[i].file_acl) eprintf("L");
-					if (it[i].faddr) eprintf("D");
-					if (it[i].frag) eprintf("R");
-					if (it[i].fsize) eprintf("z");
-					*/
-					
-					// it[i].mode&=~07777;
-					// it[i].uid=0;
-					// it[i].atime=0;
-					// it[i].ctime=0;
-					// it[i].mtime=0;
-					// it[i].dtime=0;
-					// it[i].gid=0;
-					// it[i].links_count=0;
-					// it[i].num_blocks=0;
-					// it[i].flags=0;
-					// it[i].translator=0;
-					// it[i].generation=0;
-					// it[i].mode_high=0;
-					// it[i].uid_high=0;
-					// it[i].gid_high=0;
-					// it[i].author=0;
-					// *** If file system doesn't use ACLs:
-					// it[i].file_acl=0;
-					// *** If file system doesn't use fragments:
-					// it[i].faddr=0;
-					// it[i].frag=0;
-					// it[i].fsize=0;
-				}
-				for (unsigned i=0;i<bs;++i) {
-					if (error_bitmap[i]) {
-						have_soft_errors=true;
-						memset(it_b,0,bs);
-						break;
+				have_zero_errors=true;
+				r=bdev_short_read(sc->bdev,it_a,1,it_b,error_bitmap);
+//				eprintf("%s->short_read(%llu,1,%p,%p)=%lli\n",bdev_get_name(sc->bdev),(unsigned long long)it_a,it_b,error_bitmap,(int long long)r);
+				if (1!=r) {
+					have_hard_errors=true;
+					have_soft_errors=true;
+					memset(it_b,0,bs);
+				} else {
+//					struct inode * it=(struct inode *)error_bitmap;
+					int ni=bs/sizeof(struct inode);
+					if (first) {
+						first=false;
+						// eprintf("Errors in fields: ");
+					}
+					for (int i=0;i<ni;++i) {
+						/*
+						eprintf("[it[i].links_count=%u]",it[i].links_count);
+						if (it[i].mode&07777) eprintf("M");
+						if (it[i].uid) eprintf("u");
+						if (it[i].atime) eprintf("a");
+						if (it[i].ctime) eprintf("c");
+						if (it[i].mtime) eprintf("m");
+						if (it[i].dtime) eprintf("d");
+						if (it[i].gid) eprintf("g");
+						if (it[i].links_count) eprintf("l");
+						if (it[i].num_blocks) eprintf("b");
+						if (it[i].flags) eprintf("f");
+						if (it[i].translator) eprintf("t");
+						if (it[i].generation) eprintf("e");
+						if (it[i].mode_high) eprintf("H");
+						if (it[i].uid_high) eprintf("U");
+						if (it[i].gid_high) eprintf("G");
+						if (it[i].author) eprintf("A");
+						if (it[i].file_acl) eprintf("L");
+						if (it[i].faddr) eprintf("D");
+						if (it[i].frag) eprintf("R");
+						if (it[i].fsize) eprintf("z");
+						*/
+						
+						// it[i].mode&=~07777;
+						// it[i].uid=0;
+						// it[i].atime=0;
+						// it[i].ctime=0;
+						// it[i].mtime=0;
+						// it[i].dtime=0;
+						// it[i].gid=0;
+						// it[i].links_count=0;
+						// it[i].num_blocks=0;
+						// it[i].flags=0;
+						// it[i].translator=0;
+						// it[i].generation=0;
+						// it[i].mode_high=0;
+						// it[i].uid_high=0;
+						// it[i].gid_high=0;
+						// it[i].author=0;
+						// *** If file system doesn't use ACLs:
+						// it[i].file_acl=0;
+						// *** If file system doesn't use fragments:
+						// it[i].faddr=0;
+						// it[i].frag=0;
+						// it[i].fsize=0;
+					}
+					for (unsigned i=0;i<bs;++i) {
+						if (error_bitmap[i]) {
+							have_soft_errors=true;
+							memset(it_b,0,bs);
+							break;
+						}
 					}
 				}
 			}
+			it_a++;
+			it_b+=bs;
 		}
-		it_a++;
-		it_b+=bs;
-	}
-	if (!first) {
-		// eprintf("\n");
-	}
-	if (have_zero_errors) {
-		if (have_soft_errors) {
-			if (have_hard_errors) {
-				eprintf("\033[31m");
-				ERRORF("%s: While reading inode table for group %u: Couldn't read all blocks of inode table :(",sc->name,sc->table_reader_group);
-				eprintf("\033[0m");
+		if (!first) {
+//			eprintf("\n");
+		}
+		if (have_zero_errors) {
+			if (have_soft_errors) {
+				if (have_hard_errors) {
+					eprintf("\033[31m");
+					ERRORF("%s: While reading inode table for group %u: Couldn't read all blocks of inode table :(",sc->name,sc->table_reader_group);
+					eprintf("\033[0m");
+				} else {
+					eprintf("\033[31m");
+					ERRORF("%s: While reading inode table for group %u: Couldn't read all blocks savely :(",sc->name,sc->table_reader_group);
+					eprintf("\033[0m");
+				}
 			} else {
-				eprintf("\033[31m");
-				ERRORF("%s: While reading inode table for group %u: Couldn't read all blocks savely :(",sc->name,sc->table_reader_group);
-				eprintf("\033[0m");
+				NOTIFYF("%s: While reading inode table for group %u: Unproblematic read errors.",sc->name,sc->table_reader_group);
 			}
-		} else {
-			NOTIFYF("%s: While reading inode table for group %u: Unproblematic read errors.",sc->name,sc->table_reader_group);
 		}
+		
+//		if (!sc->background) {
+			process_table_for_group(sc->table_reader_group,sc);
+//		}
 	}
-	
-//	if (!sc->background) {
-		process_table_for_group(sc->table_reader_group,sc);
-//	}
 	
 	atomic_inc(&sc->prereaded);
 	
@@ -2728,6 +2734,8 @@ found_superblock:
 	);
 	
 	bool have_gdt=false;
+	bool gdt_from_group_0 = false;
+	
 	for (unsigned pass=0;pass<3;++pass) {
 		block_t sb_offset;
 		
@@ -2756,6 +2764,7 @@ found_superblock:
 			
 			if (sc->size_of_gdt_Blocks==bdev_read(sc->bdev,sb_offset,sc->size_of_gdt_Blocks,sc->gdtv1?(void*)sc->gdtv1:(void*)sc->gdtv2)) {
 				have_gdt=true;
+				gdt_from_group_0 = !group;
 				break;
 			}
 		// CLOSE_PROGRESS_BAR_LOOP()
@@ -2775,6 +2784,18 @@ found_superblock:
 		gdt_disk2memory_v1(sc->gdt,sc->gdtv1,sc->num_groups);
 	} else {
 		gdt_disk2memory_v2(sc->gdt,sc->gdtv2,sc->num_groups);
+	}
+	
+	if (!gdt_from_group_0) {
+		// The group descriptor table backups only contain bogus flags. So, we have to set the
+		// BG_INODE_TABLE_INITIALIZED flags in order to make sure, the table reader actually
+		// reads the inode table and allocation bitmaps. However, that also means, we may end
+		// up reading uninitialized data and hence find tons of errors that aren't really there.
+		for (unsigned g = 1; g < sc->num_groups; ++g) {
+			sc->gdt[g].flags |= BG_INODE_TABLE_INITIALIZED;
+			sc->gdt[g].flags &= ~BG_INODE_ALLOCATION_MAP_UNINIT;
+			sc->gdt[g].flags &= ~BG_CLUSTER_ALLOCATION_MAP_UNINIT;
+		}
 	}
 	
 #define NUM_ZIND 12 // zero    indirect -> direct
@@ -3070,6 +3091,66 @@ found_superblock:
 			 */
 		}
 #endif // #if 0
+	}
+	
+	{
+		for (unsigned long g = 0; g < sc->num_groups; ++g) {
+			if (! (sc->sb->ro_compat & (RO_COMPAT_METADATA_CSUM | RO_COMPAT_GDT_CSUM))) {
+				if (sc->gdt[g].flags & BG_INODE_ALLOCATION_MAP_UNINIT) {
+					NOTIFYF("%s: Group %lu has flag BG_INODE_ALLOCATION_MAP_UNINIT set, but file system has neither RO_COMPAT_METADATA_CSUM nor RO_COMPAT_GDT_CSUM set.",sc->name,g);
+					// Only save thing to do is to clear the uninit flag and write correct inode allocation map
+				}
+				if (sc->gdt[g].flags & BG_CLUSTER_ALLOCATION_MAP_UNINIT) {
+					NOTIFYF("%s: Group %lu has flag BG_CLUSTER_ALLOCATION_MAP_UNINIT set, but file system has neither RO_COMPAT_METADATA_CSUM nor RO_COMPAT_GDT_CSUM set.",sc->name,g);
+					// Only save thing to do is to clear the uninit flag and write correct cluster allocation map
+				}
+			}
+			/*
+			 * BG_INODE_TABLE_INITIALIZED: No isolated plausibility check possible:
+			 * If checksums are in use, this flag may be set or unset with the appropriate meaning
+			 * Without checksums, this flag may be set or unset, both meaning it's initialized.
+			 * So: all four combinations of "has checksum" and "is zeroed" are valid and meaningful.
+			 */
+			if (sc->gdt[g].flags & BG_UNKNOWN_0008) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0008 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0010) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0010 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0020) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0020 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0040) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0040 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0080) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0080 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0100) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0100 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0200) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0200 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0400) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0400 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_0800) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_0800 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_1000) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_1000 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_2000) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_2000 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_4000) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_4000 set.",sc->name,g);
+			}
+			if (sc->gdt[g].flags & BG_UNKNOWN_8000) {
+				NOTIFYF("%s: Group %lu has flag UNKNOWN_8000 set.",sc->name,g);
+			}
+		}
 	}
 	
 recheck_compat_flags:
@@ -3779,10 +3860,12 @@ recheck_compat_flags:
 				}
 			}
 			
-			for (unsigned ino=0;ino<sc->sb->inodes_per_group;++ino,++inode_num) {
-				PRINT_PROGRESS_BAR(inode_num);
-				
-				check_inode(sc,inode_num,false);
+			if (sc->gdt[group].flags & BG_INODE_TABLE_INITIALIZED) {
+				for (unsigned ino=0;ino<sc->sb->inodes_per_group;++ino,++inode_num) {
+					PRINT_PROGRESS_BAR(inode_num);
+					
+					check_inode(sc,inode_num,false);
+				}
 			}
 			
 			++group;

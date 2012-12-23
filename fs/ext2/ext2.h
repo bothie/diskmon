@@ -292,6 +292,23 @@ struct group_desciptor_v1 {
 /*020*/	// End of Structure (32 bytes)
 };
 
+#define BG_INODE_ALLOCATION_MAP_UNINIT   0x0001 /* Inode table/bitmap not in use */
+#define BG_CLUSTER_ALLOCATION_MAP_UNINIT 0x0002 /* Block bitmap not in use */
+#define BG_INODE_TABLE_INITIALIZED       0x0004 /* On-disk itable initialized to zero */
+#define BG_UNKNOWN_0008                  0x0008
+#define BG_UNKNOWN_0010                  0x0010
+#define BG_UNKNOWN_0020                  0x0020
+#define BG_UNKNOWN_0040                  0x0040
+#define BG_UNKNOWN_0080                  0x0080
+#define BG_UNKNOWN_0100                  0x0100
+#define BG_UNKNOWN_0200                  0x0200
+#define BG_UNKNOWN_0400                  0x0400
+#define BG_UNKNOWN_0800                  0x0800
+#define BG_UNKNOWN_1000                  0x1000
+#define BG_UNKNOWN_2000                  0x2000
+#define BG_UNKNOWN_4000                  0x4000
+#define BG_UNKNOWN_8000                  0x8000
+
 struct group_desciptor_v2 {
 /*000*/	u32 cluster_allocation_map_lo; // Blocks bitmap block */
 /*004*/	u32 inode_allocation_map_lo;   // Inodes bitmap block */
