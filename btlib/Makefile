@@ -27,11 +27,13 @@ TOPDIR   = ..
 THISDIR  = btlib
 
 SRCS = \
-	btlock.c \
-	btstr_mmemcpy.c \
-	bttime_mstrftime.c \
-	parseutil_parse_c_string.c \
-	vasiar.c \
+	btthread.c \
+
+#	btlock.c \
+#	btstr_mmemcpy.c \
+#	bttime_mstrftime.c \
+#	parseutil_parse_c_string.c \
+#	vasiar.c \
 
 LIBTARGET = bt
 

@@ -1,3 +1,5 @@
+// -> define globally (or not) #define BTCLONE // broken on amd64?
+
 #define __athlon__
 
 #include <btatomic.h>
@@ -12,6 +14,7 @@
 
 #include <assert.h>
 #include <btlock.h>
+#include <btthread.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,10 +22,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <unistd.h>
 #include <zlib.h>
 
 /*
@@ -55,7 +56,6 @@ epi=entries per inode (z.B. 256 für 1024 cluster size)
 0x8000000X+2-0x8..Y -> Dies ist eine Gruppenbeschreibung, inode nummer gibt Gruppe an, Y=Anzahl Cluster für Gruppenbeschreibung+1+X
 */
 
-// #define BTCLONE // broken on amd64?
 #define COMC_IN_MEMORY
 
 /*
@@ -104,21 +104,6 @@ epi=entries per inode (z.B. 256 für 1024 cluster size)
 #	endif // #ifndef PRINT_MARK_IT
 #endif // #ifdef PRINT_MARK_ALL
 
-#ifdef BTCLONE
-
-#include <linux/sched.h>
-extern int clone(int (*)(void *),void *,int,void *,...);
-#define THREAD_RETURN_TYPE int
-#define THREAD_RETURN() do { return 0; } while (0)
-
-#else // #ifdef BTCLONE
-
-#include <pthread.h>
-#define THREAD_RETURN_TYPE void * 
-#define THREAD_RETURN() do { return NULL; } while (0)
-
-#endif // #ifdef BTCLONE, else
-
 /*
  * 295 threads (plus two or three or so) is a limit of valgrind
  * Each thread needs 2 fds (for it's thread structure lock), and maybe 2 fds of the com_cache's lock this thread is wating for.
@@ -156,58 +141,6 @@ unsigned soft_child_limit=12;
 
 // #define INODE_TABLE_ROUNDROUBIN 0xffffffffLU
 #define INODE_TABLE_ROUNDROUBIN 512LU
-
-static inline int gettid() {
-	return syscall(SYS_gettid);
-}
-
-#ifdef BTCLONE
-#else // #ifdef BTCLONE
-#endif // #ifdef BTCLONE, else
-
-int btclone(void * * stack_memory,int (*thread_main)(void * arg),size_t stack_size,int flags,void * arg) {
-#if HAVE_LINUX_CLONE
-	*stack_memory=malloc(stack_size);
-	void * stack_argument;
-	if (unlikely(!*stack_memory)) {
-		return -1;
-	}
-	
-	/*
-	 * nice try, but doesn't work on amd64 with register argument passing ...
-	 *
-	 * So, just break the one platform that has stack growth in the "wrong" direction.
-	 */
-/*
-	if ((char *)&stack_memory>(char *)&stack_argument) {
-*/
-		stack_argument=(char *)*stack_memory+stack_size;
-/*
-	} else {
-		stack_argument=*stack_memory;
-		assert(0);
-	}
-*/
-	
-	int retval=clone(thread_main,stack_argument,flags,arg);
-	
-	if (likely(retval>=0)) {
-		return retval;
-	}
-	
-	free(*stack_memory);
-	*stack_memory=NULL;
-	return retval;
-#else // #if HAVE_LINUX_CLONE
-	ignore(stack_memory);
-	ignore(thread_main);
-	ignore(stack_size);
-	ignore(flags);
-	ignore(arg);
-	errno=ENOSYS;
-	return -1;
-#endif // #if HAVE_LINUX_CLONE, else
-}
 
 volatile unsigned live_child;
 
@@ -546,6 +479,22 @@ struct btlock_lock {
 	*/ \
 } while (0)
 
+#define TRE_WAIT() do { \
+	btlock_wait(sc->table_reader_empty); \
+} while (0)
+
+#define TRE_WAKE() do { \
+	btlock_wake(sc->table_reader_empty); \
+} while (0)
+
+#define TRF_WAIT() do { \
+	btlock_wait(sc->table_reader_full); \
+} while (0)
+
+#define TRF_WAKE() do { \
+	btlock_wake(sc->table_reader_full); \
+} while (0)
+
 struct com_cache_entry {
 	struct com_cache_entry * next;
 	struct com_cache_entry * prev;
@@ -638,6 +587,8 @@ struct scan_context {
 	 */
 	volatile unsigned table_reader_group;
 	atomic_t prereaded;
+	struct btlock_lock * table_reader_full;
+	struct btlock_lock * table_reader_empty;
 	
 	/*
 	 * Tells, wether the reader is running in the background or not. It 
@@ -727,7 +678,7 @@ bool group_has_super_block(const struct super_block * sb,unsigned group) {
 	return true;
 }
 
-void process_table_for_group(unsigned group,struct scan_context * sc) {
+void process_table_for_group(unsigned long group,struct scan_context * sc) {
 /*	{
 		struct read_tables_list * lh=sc->list_head;
 		sc->list_head=lh->next;
@@ -761,7 +712,7 @@ void process_table_for_group(unsigned group,struct scan_context * sc) {
 	free(sc->list_head->block_buffer);
 */
 	
-	for (unsigned i=0;i<sc->sb->inodes_per_group;++i) {
+	for (unsigned i = 0; i < (sc->sb->inodes_per_group - sc->gdt[group].num_virgin_inodes); ++i) {
 		endian_swap_inode(inode+i);
 	}
 	
@@ -778,7 +729,7 @@ bool read_table_for_one_group(struct scan_context * sc) {
 		if (++counter==PREREADED_NOTIFYTIME) {
 //			NOTIFY("read_table_for_one_group: Going to sleep to let the foreground process catch up ...");
 		}
-		sleep(1);
+		TRF_WAIT();
 	}
 	
 /*	counter=0;
@@ -831,7 +782,7 @@ bool read_table_for_one_group(struct scan_context * sc) {
 	
 	size_t  cb_n=sc->cluster_size_Bytes;
 	size_t  ib_n=sc->sb->inodes_per_group/8;
-	size_t  it_n=sc->sb->inodes_per_group*sizeof(*sc->inode_table);
+	size_t  it_n=(sc->sb->inodes_per_group - sc->gdt[sc->table_reader_group].num_virgin_inodes) * sizeof(*sc->inode_table);
 	
 	block_t cb_a=sc->cluster_size_Blocks*sc->gdt[sc->table_reader_group].cluster_allocation_map;
 	block_t ib_a=sc->cluster_size_Blocks*sc->gdt[sc->table_reader_group].inode_allocation_map;
@@ -999,15 +950,96 @@ bool read_table_for_one_group(struct scan_context * sc) {
 				NOTIFYF("%s: While reading inode table for group %u: Unproblematic read errors.",sc->name,sc->table_reader_group);
 			}
 		}
-		
-//		if (!sc->background) {
-			process_table_for_group(sc->table_reader_group,sc);
-//		}
 	}
 	
 	atomic_inc(&sc->prereaded);
 	
 	return true;
+}
+
+/*
+ * CCE_LOCK(walk) must be held
+ */
+void comc_move_front(struct scan_context * sc, struct com_cache_entry * walk, bool new) {
+	if (new) {
+		CC_LOCK(sc->comc);
+	} else {
+		if (!walk->prev) {
+			return;
+		}
+		
+		CC_LOCK(sc->comc);
+		
+		walk->prev->next = walk->next;
+		
+		if (walk->next) {
+			walk->next->prev = walk->prev;
+		} else {
+			sc->comc.tail = walk->prev;
+		}
+	}
+	
+	if (likely(sc->comc.head)) {
+		sc->comc.head->prev = walk;
+	} else {
+		sc->comc.tail = walk;
+	}
+	
+	walk->next = sc->comc.head;
+	sc->comc.head = walk;
+	walk->prev = NULL;
+
+	CC_UNLOCK(sc->comc);
+}
+
+void comc_get(struct scan_context * sc, struct com_cache_entry * walk) {
+	// CCE_LOCK(walk); <--- was already locked by get_com_cache_entry
+	
+	// BEGIN READING
+	walk->entry=malloc(4*sc->comc.clusters_per_entry);
+#ifdef COMC_IN_MEMORY
+	if (!sc->comc.compr[walk->index].ptr) {
+#else // #ifdef COMC_IN_MEMORY
+	char * tmp;
+	int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_RDONLY);
+	if (fd<0) {
+		if (errno!=ENOENT) {
+			eprintf("cluster-owner-map-cache-thread: OOPS: open(»%s«): %s\n",tmp,strerror(errno));
+			exit(2);
+		}
+		free(tmp);
+#endif // #ifdef COMC_IN_MEMORY, else
+		memset(walk->entry,0,4*sc->comc.clusters_per_entry);
+//		eprintf("Init %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
+	} else {
+//		eprintf("Read %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
+#ifdef COMC_IN_MEMORY
+		Bytef * cbuffer=(Bytef *)sc->comc.compr[walk->index].ptr;
+		uLongf  dbuflen=sc->comc.compr[walk->index].len;
+#else // #ifdef COMC_IN_MEMORY
+		if (CC_DEBUG_LOCKS) eprintf("%4i in thread %5i: Reading data by using fd %i\n",__LINE__,gettid(),fd);
+		uLongf dbuflen=read(fd,cbuffer,cbuflen);
+		if (close(fd)) {
+			eprintf("cluster-owner-map-cache-thread: OOPS: close(»%s«): %s\n",tmp,strerror(errno));
+			exit(2);
+		}
+		free(tmp);
+#endif // #ifdef COMC_IN_MEMORY, else
+		uLongf x=4*sc->comc.clusters_per_entry;
+		if (Z_OK!=uncompress((Bytef*)walk->entry,&x,(Bytef*)cbuffer,dbuflen)) {
+			eprintf("cluster-owner-map-cache-thread: OOPS: uncompress failed\n");
+			exit(2);
+		}
+		if (x!=4*sc->comc.clusters_per_entry) {
+			eprintf("cluster-owner-map-cache-thread: OOPS: uncompress failed\n");
+			exit(2);
+		}
+	}
+	
+	walk->dirty=false;
+	// END READING
+	
+	comc_move_front(sc, walk, true);
 }
 
 volatile bool exit_request_com_cache_thread=false;
@@ -1034,64 +1066,11 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 			++sc->comc.num_in_memory;
 			CC_UNLOCK(sc->comc);
 			
-			// CCE_LOCK(walk); <--- was already locked by get_com_cache_entry
+			comc_get(sc, walk);
 			
-			// BEGIN READING
-			walk->entry=malloc(4*sc->comc.clusters_per_entry);
-#ifdef COMC_IN_MEMORY
-			if (!sc->comc.compr[walk->index].ptr) {
-#else // #ifdef COMC_IN_MEMORY
-			char * tmp;
-			int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_RDONLY);
-			if (fd<0) {
-				if (errno!=ENOENT) {
-					eprintf("cluster-owner-map-cache-thread: OOPS: open(»%s«): %s\n",tmp,strerror(errno));
-					exit(2);
-				}
-				free(tmp);
-#endif // #ifdef COMC_IN_MEMORY, else
-				memset(walk->entry,0,4*sc->comc.clusters_per_entry);
-//				eprintf("Init %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
-			} else {
-//				eprintf("Read %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
-#ifdef COMC_IN_MEMORY
-				Bytef * cbuffer=(Bytef *)sc->comc.compr[walk->index].ptr;
-				uLongf  dbuflen=sc->comc.compr[walk->index].len;
-#else // #ifdef COMC_IN_MEMORY
-				if (CC_DEBUG_LOCKS) eprintf("%4i in thread %5i: Reading data by using fd %i\n",__LINE__,gettid(),fd);
-				uLongf dbuflen=read(fd,cbuffer,cbuflen);
-				if (close(fd)) {
-					eprintf("cluster-owner-map-cache-thread: OOPS: close(»%s«): %s\n",tmp,strerror(errno));
-					exit(2);
-				}
-				free(tmp);
-#endif // #ifdef COMC_IN_MEMORY, else
-				uLongf x=4*sc->comc.clusters_per_entry;
-				if (Z_OK!=uncompress((Bytef*)walk->entry,&x,(Bytef*)cbuffer,dbuflen)) {
-					eprintf("cluster-owner-map-cache-thread: OOPS: uncompress failed\n");
-					exit(2);
-				}
-				if (x!=4*sc->comc.clusters_per_entry) {
-					eprintf("cluster-owner-map-cache-thread: OOPS: uncompress failed\n");
-					exit(2);
-				}
-			}
-			
-			walk->dirty=false;
-			// END READING
+			CCE_UNLOCK(walk);
 			
 			CC_LOCK(sc->comc);
-			if (unlikely(!sc->comc.head)) {
-				sc->comc.head=sc->comc.tail=walk;
-				walk->next=walk->prev=NULL;
-			} else {
-				walk->prev=NULL;
-				walk->next=sc->comc.head;
-				sc->comc.head->prev=walk;
-				sc->comc.head=walk;
-			}
-
-			CCE_UNLOCK(walk);
 		}
 		if (nothing_done || likely(sc->comc.num_in_memory>=MAX_COMC_IN_MEMORY)) {
 			if (likely(sc->comc.num_in_memory>MAX_COMC_DIRTY)) {
@@ -1181,6 +1160,7 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 	}
 	free(cbuffer);
 	exit_request_com_cache_thread=false;
+	GENERAL_BARRIER();
 	CCT_WAKE();
 	
 	eprintf("Returning from com_cache_thread (exiting cluster-owner-map-cache-thread)\n");
@@ -1232,55 +1212,52 @@ struct com_cache_entry * get_com_cache_entry(struct scan_context * sc,size_t ccg
 		ccg=*((size_t*)0);
 	}
 	assert(ccg<sc->comc.size);
-	if (!sc->comc.ccgroup[ccg]) {
-		sc->comc.ccgroup[ccg]=malloc(sizeof(*sc->comc.ccgroup[ccg]));
-		sc->comc.ccgroup[ccg]->index=ccg;
+	struct com_cache_entry * walk = sc->comc.ccgroup[ccg];
+	
+	if (!walk) {
+		walk = sc->comc.ccgroup[ccg] = malloc(sizeof(*sc->comc.ccgroup[ccg]));
+		
+		walk->index=ccg;
 		do {
-			CCE_LOCK_MK(sc->comc.ccgroup[ccg]);
-		} while (!sc->comc.ccgroup[ccg]->debug_lock);
-		sc->comc.ccgroup[ccg]->num_in_use=1;
-		sc->comc.ccgroup[ccg]->next=NULL;
-		sc->comc.ccgroup[ccg]->prev=sc->comc.read_tail;
+			CCE_LOCK_MK(walk);
+		} while (!walk->debug_lock);
+		walk->num_in_use=1;
+		walk->next=NULL;
+		walk->prev=sc->comc.read_tail;
+		CCE_LOCK(walk);
+#ifdef USE_COMC_THREAD_TO_READ
 		if (!sc->comc.read_tail) {
-			sc->comc.read_head=sc->comc.ccgroup[ccg];
+			sc->comc.read_head=walk;
 		} else {
-			sc->comc.read_tail->next=sc->comc.ccgroup[ccg];
+			sc->comc.read_tail->next=walk;
 		}
-		sc->comc.read_tail=sc->comc.ccgroup[ccg];
+		sc->comc.read_tail=walk;
 		// A little bit strange. We lock this here and don't unlock it again. That 
 		// will be done by the reader thread. This allows us to wait for it by a 
 		// simple double locking.
 		CCT_WAKE(); // Make sure, we won't wait senselessly for the com_cache_thread.
-		CCE_LOCK(sc->comc.ccgroup[ccg]);
-	} else {
-		++sc->comc.ccgroup[ccg]->num_in_use;
-	}
-	CC_UNLOCK(sc->comc);
-	CCE_LOCK(sc->comc.ccgroup[ccg]);
-	CC_LOCK(sc->comc);
-	struct com_cache_entry * walk=sc->comc.ccgroup[ccg];
-	if (walk->prev) {
-		walk->prev->next=walk->next;
+		CC_UNLOCK(sc->comc);
+		CCE_LOCK(walk);
+#else // #ifdef USE_COMC_THREAD_TO_READ
+		++sc->comc.num_in_memory;
+		CC_UNLOCK(sc->comc);
 		
-		if (walk->next) {
-			walk->next->prev=walk->prev;
-		} else {
-			sc->comc.tail=walk->prev;
-		}
-		walk->prev=NULL;
-		walk->next=sc->comc.head;
-		if (sc->comc.head) {
-			sc->comc.head->prev=walk;
-		} else {
-			sc->comc.tail=walk;
-		}
-		sc->comc.head=walk;
+		comc_get(sc, walk);
+#endif // #ifdef USE_COMC_THREAD_TO_READ, else
+		CCT_WAKE(); // Make sure the com cache thread gets woken up even is nothing really *needs* it, so it can do it's clean up job
+	} else {
+		++walk->num_in_use;
+		CC_UNLOCK(sc->comc);
+		CCE_LOCK(walk);
 	}
-	CC_UNLOCK(sc->comc);
-	return (struct com_cache_entry *)sc->comc.ccgroup[ccg];
+	comc_move_front(sc, walk, false);
+	return walk;
 }
 
-void release(struct scan_context * sc,struct com_cache_entry * ccge) {
+void release(struct scan_context * sc, struct com_cache_entry * ccge) {
+	if (1 == ccge->num_in_use) {
+		comc_move_front(sc, ccge, false);
+	}
 	CCE_UNLOCK(ccge);
 	CC_LOCK(sc->comc);
 	--ccge->num_in_use;
@@ -1445,31 +1422,13 @@ THREAD_RETURN_TYPE ext2_read_tables(void * arg) {
 	
 	eprintf("Executing read_tables via thread %i\n",gettid());
 	
-	unsigned num_clusters_per_group_for_inode_table=sc->sb->inodes_per_group/(sc->cluster_size_Bytes/sizeof(struct inode));
-	
 	OPEN_PROGRESS_BAR_LOOP(0,sc->table_reader_group,sc->num_groups)
 	
 		read_table_for_one_group(sc);
 		
-		unsigned long c;
-		
-		c=sc->gdt[sc->table_reader_group].cluster_allocation_map;
-		if (PRINT_MARK_CAM) eprintf("Marking cluster %lu in use (cluster allocation bitmap in group %u)\n",c,sc->table_reader_group);
-		MARK_CLUSTER_IN_USE_BY(sc,c,-1UL-(5UL*sc->table_reader_group));
-		
-		c=sc->gdt[sc->table_reader_group].inode_allocation_map;
-		if (PRINT_MARK_IAM) eprintf("Marking cluster %lu in use (inode allocation bitmap in group %u)\n",c,sc->table_reader_group);
-		MARK_CLUSTER_IN_USE_BY(sc,c,-2UL-(5UL*sc->table_reader_group));
-		
-		if (PRINT_MARK_IT) eprintf(
-			"Marking clusters %lu .. %lu in use (inode table in group %u)\n"
-			,(unsigned long)sc->gdt[sc->table_reader_group].inode_table
-			,(unsigned long)(sc->gdt[sc->table_reader_group].inode_table+num_clusters_per_group_for_inode_table)
-			,sc->table_reader_group
-		);
-		MARK_CLUSTERS_IN_USE_BY(sc,sc->gdt[sc->table_reader_group].inode_table,num_clusters_per_group_for_inode_table,-3UL-(5UL*sc->table_reader_group));
-		
 		++sc->table_reader_group;
+		
+		TRE_WAKE();
 		
 		PRINT_PROGRESS_BAR(sc->table_reader_group);
 	CLOSE_PROGRESS_BAR_LOOP()
@@ -2167,6 +2126,16 @@ void typecheck_inode(struct inode_scan_context * isc) {
 }
 
 void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetching) {
+	{
+		unsigned long i = inode_num - 1;
+		unsigned long g = i / sc->sb->inodes_per_group;
+		i %= sc->sb->inodes_per_group;
+		
+		if (i >= sc->sb->inodes_per_group - sc->gdt[g].num_virgin_inodes) {
+			return;
+		}
+	}
+	
 	struct inode_scan_context * isc=malloc(sizeof(*isc));
 	assert(isc);
 	isc->sc=sc;
@@ -2176,6 +2145,8 @@ void check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetchi
 		isc->sc->table_reader_group=(isc->inode_num-1)/isc->sc->sb->inodes_per_group;
 		
 		read_table_for_one_group(isc->sc);
+		
+		process_table_for_group(sc->table_reader_group, sc);
 	}
 	
 	typecheck_inode(isc);
@@ -2640,6 +2611,10 @@ bool ext2_fsck(const char * _name) {
 	void * ext2_read_tables_stack_memory=NULL;
 #endif // #ifdef BTCLONE
 	
+	sc->com_cache_thread_lock=NULL;
+	sc->table_reader_full=NULL;
+	sc->table_reader_empty=NULL;
+	
 	sc->bdev=bdev_lookup_bdev(sc->name=_name);
 	if (!sc->bdev) {
 		ERRORF("Couldn't lookup device %s.",sc->name);
@@ -2791,10 +2766,16 @@ found_superblock:
 		// BG_INODE_TABLE_INITIALIZED flags in order to make sure, the table reader actually
 		// reads the inode table and allocation bitmaps. However, that also means, we may end
 		// up reading uninitialized data and hence find tons of errors that aren't really there.
-		for (unsigned g = 1; g < sc->num_groups; ++g) {
+		for (unsigned g = 0; g < sc->num_groups; ++g) {
 			sc->gdt[g].flags |= BG_INODE_TABLE_INITIALIZED;
 			sc->gdt[g].flags &= ~BG_INODE_ALLOCATION_MAP_UNINIT;
 			sc->gdt[g].flags &= ~BG_CLUSTER_ALLOCATION_MAP_UNINIT;
+		}
+	}
+	
+	if (0 /* !checksum_ok(...) */) {
+		for (unsigned g = 0; g < sc->num_groups; ++g) {
+			sc->gdt[g].num_virgin_inodes = 0;
 		}
 	}
 	
@@ -3707,6 +3688,8 @@ recheck_compat_flags:
 	sc->background=true;
 	sc->table_reader_group=0;
 	sc->com_cache_thread_lock=btlock_lock_mk();
+	sc->table_reader_full=btlock_lock_mk();
+	sc->table_reader_empty=btlock_lock_mk();
 	
 	if (0) {
 		atomic_t x;
@@ -3790,8 +3773,10 @@ recheck_compat_flags:
 	
 	{
 		u32 size_of_gdt_Clusters=(sc->size_of_gdt_Blocks+sc->cluster_size_Blocks-1)/sc->cluster_size_Blocks;
-		unsigned group=0;
+		unsigned long group=0;
 		unsigned long inode_num=1;
+		
+		unsigned num_clusters_per_group_for_inode_table = sc->sb->inodes_per_group / (sc->cluster_size_Bytes / sizeof(struct inode));
 		
 		OPEN_PROGRESS_BAR_LOOP(1,inode_num,sc->sb->num_inodes)
 			
@@ -3799,7 +3784,43 @@ recheck_compat_flags:
 			
 			while (sc->table_reader_group==group) {
 				PROGRESS_STALLED(inode_num);
-				sleep(1);
+				TRE_WAIT();
+			}
+			
+			{
+				process_table_for_group(group, sc);
+				
+				unsigned long c;
+				
+				c = sc->gdt[group].cluster_allocation_map;
+				if (PRINT_MARK_CAM) {
+					eprintf(
+						"Marking cluster %lu in use (cluster allocation bitmap in group %lu)\n"
+						,c
+						,group
+					);
+				}
+				MARK_CLUSTER_IN_USE_BY(sc, c, -1UL - (5UL * group));
+				
+				c = sc->gdt[group].inode_allocation_map;
+				if (PRINT_MARK_IAM) {
+					eprintf(
+						"Marking cluster %lu in use (inode allocation bitmap in group %lu)\n"
+						,c
+						,group
+					);
+				}
+				MARK_CLUSTER_IN_USE_BY(sc, c, -2UL - (5UL * group));
+				
+				if (PRINT_MARK_IT) {
+					eprintf(
+						"Marking clusters %lu .. %lu in use (inode table in group %lu)\n"
+						,(unsigned long)sc->gdt[group].inode_table
+						,(unsigned long)(sc->gdt[group].inode_table + num_clusters_per_group_for_inode_table)
+						,group
+					);
+				}
+				MARK_CLUSTERS_IN_USE_BY(sc, sc->gdt[group].inode_table, num_clusters_per_group_for_inode_table, -3UL - (5UL * group));
 			}
 			
 //			eprintf("Parent's current group: %u\r",group);
@@ -3820,19 +3841,37 @@ recheck_compat_flags:
 					 * in group 0 as being used.
 					 */
 					for (u32 c=1;c<cluster;++c) {
-						if (PRINT_MARK_SB0GAP) eprintf("Marking cluster %lu in use (gap before super block in group 0)\n",(unsigned long)c);
+						if (PRINT_MARK_SB0GAP) {
+							eprintf(
+								"Marking cluster %lu in use (gap before super block in group 0)\n"
+								,(unsigned long)c
+							);
+						}
 						MARK_CLUSTER_IN_USE_BY(sc,c,-4); // Same ID as the super block of group 0 itself
 					}
 				}
 				
 				if (cluster || !sc->cluster_offset) {
 					// Mark cluster containing super block as in-use
-					if (PRINT_MARK_SB) eprintf("Marking cluster %lu in use (super block of group %u)\n",(unsigned long)cluster,group);
+					if (PRINT_MARK_SB) {
+						eprintf(
+							"Marking cluster %lu in use (super block of group %lu)\n"
+							,(unsigned long)cluster
+							,group
+						);
+					}
 					MARK_CLUSTER_IN_USE_BY(sc,cluster,-4UL-(5UL*group));
 				}
 				
 				++cluster;
-				if (PRINT_MARK_GDT) eprintf("Marking clusters %lu .. %lu in use (group descriptor table in group %u)\n",(unsigned long)cluster,(unsigned long)(cluster+size_of_gdt_Clusters-1),group);
+				if (PRINT_MARK_GDT) {
+					eprintf(
+						"Marking clusters %lu .. %lu in use (group descriptor table in group %lu)\n"
+						,(unsigned long)cluster
+						,(unsigned long)(cluster + size_of_gdt_Clusters - 1)
+						,group
+					);
+				}
 				// Mark all clusters containing the group descriptor table as in-use
 				MARK_CLUSTERS_IN_USE_BY(sc,cluster,size_of_gdt_Clusters,-5UL-(5UL*group));
 			}
@@ -3870,6 +3909,8 @@ recheck_compat_flags:
 			
 			atomic_dec(&sc->prereaded);
 			
+			TRF_WAKE();
+		
 		CLOSE_PROGRESS_BAR_LOOP()
 	}
 	
@@ -3970,7 +4011,11 @@ recheck_compat_flags:
 		u32 last_ccg=(sc->sb->num_clusters-1)/sc->comc.clusters_per_entry;
 		u32 nc=sc->comc.clusters_per_entry;
 		u32 cluster;
-		for (cluster=sc->cluster_offset;cluster<sc->sb->num_clusters;cluster+=nc,++ccg) {
+		
+		cluster = sc->cluster_offset;
+		
+		OPEN_PROGRESS_BAR_LOOP(1, cluster, sc->sb->num_clusters)
+		
 			struct com_cache_entry * ccge=get_com_cache_entry(sc,ccg,cluster);
 			if (unlikely(ccg==last_ccg)) {
 				nc=sc->sb->num_clusters-cluster;
@@ -3982,7 +4027,12 @@ recheck_compat_flags:
 				}
 			}
 			release(sc,ccge);
-		}
+			
+			cluster+=nc;
+			++ccg;
+		
+		CLOSE_PROGRESS_BAR_LOOP()
+
 		assert(cluster==sc->sb->num_clusters);
 		for (;cluster<=sc->num_groups*8*sc->cluster_size_Bytes-1+sc->cluster_offset;++cluster) {
 			set_calculated_cluster_allocation_map_bit(sc,cluster);
@@ -4005,8 +4055,10 @@ recheck_compat_flags:
 	}
 	gzclose(gzf);
 	exit_request_com_cache_thread=true;
+	GENERAL_BARRIER();
 	CCT_WAKE(); // Make sure, we won't wait senselessly for the com_cache_thread.
 	CCT_WAIT(); // Wait for that thread to exit
+	GENERAL_BARRIER();
 	assert(!exit_request_com_cache_thread);
 	
 	/*
@@ -4114,6 +4166,8 @@ cleanup:
 			}
 		}
 		if (sc->com_cache_thread_lock) btlock_lock_free(sc->com_cache_thread_lock);
+		if (sc->table_reader_full) btlock_lock_free(sc->table_reader_full);
+		if (sc->table_reader_empty) btlock_lock_free(sc->table_reader_empty);
 		free(sc->inode_link_count);
 		free(sc->inode_type_str);
 		free(sc->gdt);

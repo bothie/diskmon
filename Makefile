@@ -39,10 +39,9 @@ SRCS = \
 SUBMAKES = \
 	chkraid6 \
 
-#	btlib \
-
 # bdev/dmcrypt needs crypt, so make crypt prior to bdev
 DIRS = \
+	btlib \
 	crypt \
 	bdev \
 	lvm-conf-extractor \

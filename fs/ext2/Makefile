@@ -47,10 +47,12 @@ CPPFLAGS-ext2.s += -DHAVE_LINUX_CLONE
 
 # PRINTFLAGS=true
 
-CPPFLAGS += 
-# -I$(TOPDIR)/btlib
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
-# -L$(TOPDIR)/btlib -lbt
+CPPFLAGS += \
+	-I$(TOPDIR)/btlib \
+
+LDFLAGS += \
+	-LBtLinuxLibrary -lBtLinuxLibrary \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 
