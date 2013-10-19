@@ -202,7 +202,7 @@ struct softraid_superblock_0 {
 	 * Active descriptor
 	 */
 	struct softraid_superblock_0_device_descriptor this_disk;
-};
+} __attribute__((packed));
 
 // #define MD_SB_GENERIC_CONSTANT_WORDS	32
 // #define MD_SB_GENERIC_STATE_WORDS	32
