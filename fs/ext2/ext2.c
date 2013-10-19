@@ -353,6 +353,7 @@ struct inode_scan_context {
 	unsigned long schedule_num_clusters;
 	
 	unsigned long illegal_ind_clusters[4];
+	unsigned long read_error_ind_clusters[4];
 	unsigned long used_clusters;
 	unsigned long maybe_holes;
 	unsigned long holes;
@@ -1451,6 +1452,7 @@ void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) 
 		isc->sc->bdev,cluster*isc->sc->cluster_size_Blocks,isc->sc->cluster_size_Blocks,ptr)
 	) {
 		ERRORF("%s: Inode %lu [%s]: Error while reading directory cluster %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
+		++isc->read_error_ind_clusters[0];
 		return;
 	}
 	
@@ -1620,6 +1622,7 @@ void chk_block(struct inode_scan_context * isc,int level,unsigned long cluster) 
 	
 	if (isc->sc->cluster_size_Blocks!=bdev_read(isc->sc->bdev,cluster*isc->sc->cluster_size_Blocks,isc->sc->cluster_size_Blocks,ptr)) {
 		ERRORF("%s: Inode %lu [%s]: Error while reading indirect cluster %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
+		++isc->read_error_ind_clusters[level];
 	} else {
 		for (unsigned i=0;i<isc->sc->num_clusterpointers;++i) {
 			chk_block(isc,level-1,pointer[i]);
@@ -1805,8 +1808,10 @@ THREAD_RETURN_TYPE chk_block_function(void * arg) {
 	isc_schedule_cluster_flush(isc);
 	
 	unsigned long illegal_clusters=0;
+	unsigned long read_error_clusters=0;
 	for (int i=0;i<4;++i) {
 		illegal_clusters    += isc->illegal_ind_clusters[i];
+		read_error_clusters += isc->read_error_ind_clusters[i];
 	}
 	
 	if (isc->is_dir) {
@@ -1824,7 +1829,7 @@ THREAD_RETURN_TYPE chk_block_function(void * arg) {
 			 * TODO: Same shall apply, if at least one cluster 
 			 * couldn't be read.
 			 */
-			if (unlikely(!illegal_clusters)) {
+			if (unlikely(!illegal_clusters && !read_error_clusters)) {
 				ERRORF("%s: Inode %lu [%s]: Empty directory is missing it's . and .. entry.",isc->sc->name,isc->inode_num,isc->type);
 			}
 			goto skip_dir;
