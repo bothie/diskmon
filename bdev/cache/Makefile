@@ -19,25 +19,24 @@
 ###############################################################################
 
 package        = diskmon
-copyrightyears = ????-2007
+copyrightyears = 2013-2013
 mainauthor     = Bodo Thiesen <bothie@gmx.de>
 
-MAKEFILE = Makefile.dirs
-TOPDIR   = ..
-THISDIR  = bdev
+MAKEFILE = Makefile
+TOPDIR   = ../..
+THISDIR  = bdev/cache
 
-DIRS = \
-	blindread \
-	cache \
-	dc \
-	dmcrypt \
-	dump \
-	fs \
-	loop \
-	looperr \
-	lvm \
-	lvm-conf-extract \
-	raid6 \
+SRCS = \
+	cache.c \
+
+LIBTARGET = cache
+SOTARGET = cache.so
+SOFLAGS += -L.. -lbdev
+
+CPPFLAGS-cache.o += -I.. -I../..
+
+CPPFLAGS += 
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
 
 include $(shell btmakefile --path)/Makefile.Include
 
