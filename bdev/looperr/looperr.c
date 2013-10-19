@@ -111,6 +111,13 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		char c;
 		
 		line=0;
+		c=parse_c_string(&p,true,&map_filename,NULL);
+		if (c!=' ') { line=__LINE__; goto err_msg_open; }
+		if (!parse_skip(&p,' ')) { line=__LINE__; goto err_msg_open; }
+		c=parse_c_string(&p,true,&img_filename,NULL);
+		if (c) { line=__LINE__; goto err_msg_open; }
+		
+		/*
 		if (!parse_skip(&p,'"')) { line=__LINE__; goto err_msg_open; }
 		
 		c=parse_c_string(&p,false,&map_filename,NULL);
@@ -124,6 +131,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		if (c!='"') { line=__LINE__; goto err_msg_open; }
 		
 		if (!parse_skip(&p,'"')) { line=__LINE__; goto err_msg_open; }
+		*/
 		
 		if (*p) { line=__LINE__; goto err_msg_open; }
 		
