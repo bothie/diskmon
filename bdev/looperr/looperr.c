@@ -314,7 +314,7 @@ static bool looperr_access_one_block(
 				goto out;
 			}
 			if (fdatasync(private->map)) {
-				ERRORF("looperr: Oops: Couldn't fsync bitmap file: %s",strerror(errno));
+				ERRORF("looperr: Oops: Couldn't fdatasync bitmap file: %s",strerror(errno));
 				goto out;
 			}
 		}

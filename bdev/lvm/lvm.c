@@ -1050,7 +1050,7 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 		printf(
 			"\tPhysical volume %i:\n"
 			"\t\tGiven in Argument %i\n"
-			"\t\tBacking device (this filed is informal only): %s\n"
+			"\t\tBacking device (this field is informal only): %s\n"
 			"\t\tUUID: %.32s\n"
 			"\t\tFirst block of PV data heap (in blocks): %llu\n"
 			"\t\tNum physical extents in dh (in PEs): %llu\n"
