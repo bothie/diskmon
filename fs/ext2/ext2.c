@@ -1450,7 +1450,7 @@ void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) 
 	if (isc->sc->cluster_size_Blocks!=bdev_read(
 		isc->sc->bdev,cluster*isc->sc->cluster_size_Blocks,isc->sc->cluster_size_Blocks,ptr)
 	) {
-		ERRORF("%s: Inode %lu [%s]: Error while reading directory block %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
+		ERRORF("%s: Inode %lu [%s]: Error while reading directory cluster %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
 		return;
 	}
 	
@@ -1619,7 +1619,7 @@ void chk_block(struct inode_scan_context * isc,int level,unsigned long cluster) 
 	void * ptr=(void *)pointer;
 	
 	if (isc->sc->cluster_size_Blocks!=bdev_read(isc->sc->bdev,cluster*isc->sc->cluster_size_Blocks,isc->sc->cluster_size_Blocks,ptr)) {
-		ERRORF("%s: Inode %lu [%s]: Error while reading indirect block %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
+		ERRORF("%s: Inode %lu [%s]: Error while reading indirect cluster %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
 	} else {
 		for (unsigned i=0;i<isc->sc->num_clusterpointers;++i) {
 			chk_block(isc,level-1,pointer[i]);
@@ -1804,8 +1804,10 @@ THREAD_RETURN_TYPE chk_block_function(void * arg) {
 	
 	isc_schedule_cluster_flush(isc);
 	
-	unsigned long illegal_blocks=0;
-	for (int i=0;i<4;++i) illegal_blocks+=isc->illegal_ind_clusters[i];
+	unsigned long illegal_clusters=0;
+	for (int i=0;i<4;++i) {
+		illegal_clusters    += isc->illegal_ind_clusters[i];
+	}
 	
 	if (isc->is_dir) {
 		unsigned ino=isc->inode_num-1;
@@ -1822,7 +1824,7 @@ THREAD_RETURN_TYPE chk_block_function(void * arg) {
 			 * TODO: Same shall apply, if at least one cluster 
 			 * couldn't be read.
 			 */
-			if (unlikely(!illegal_blocks)) {
+			if (unlikely(!illegal_clusters)) {
 				ERRORF("%s: Inode %lu [%s]: Empty directory is missing it's . and .. entry.",isc->sc->name,isc->inode_num,isc->type);
 			}
 			goto skip_dir;
@@ -1886,12 +1888,12 @@ THREAD_RETURN_TYPE chk_block_function(void * arg) {
 	}
 	
 skip_dir:
-	if (illegal_blocks) {
+	if (illegal_clusters) {
 		ERRORF(
-			"%s: Inode %lu [%s] contains %lu illegal block "
+			"%s: Inode %lu [%s] contains %lu illegal clusters "
 			"(%lu zind, %lu sind, %lu dind, %lu tind)."
 			,isc->sc->name,isc->inode_num,isc->type
-			,illegal_blocks
+			,illegal_clusters
 			,isc->illegal_ind_clusters[0],isc->illegal_ind_clusters[1]
 			,isc->illegal_ind_clusters[2],isc->illegal_ind_clusters[3]
 		);
