@@ -18,25 +18,27 @@
 #
 ###############################################################################
 
-package        = diskmon
-copyrightyears = ????-2007
-mainauthor     = Bodo Thiesen <bothie@gmx.de>
+#package        = diskmon
+#copyrightyears = 2013-2013
+#mainauthor     = Bodo Thiesen <bothie@gmx.de>
 
-MAKEFILE = Makefile.dirs
-TOPDIR   = ..
-THISDIR  = bdev
+MAKEFILE = Makefile
+TOPDIR   = ../..
+THISDIR  = bdev/fs
 
-DIRS = \
-	blindread \
-	dc \
-	dmcrypt \
-	dump \
-	fs \
-	loop \
-	looperr \
-	lvm \
-	lvm-conf-extract \
-	raid6 \
+SRCS = \
+	fs.c \
+
+LIBTARGET = fs
+SOTARGET = fs.so
+# SOFLAGS += -L.. -lbdev
+
+CPPFLAGS-fs.o += -I.. -I../..
+
+CPPFLAGS += 
+# -I$(TOPDIR)/btlib
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+# -L$(TOPDIR)/btlib -lbt
 
 include $(shell btmakefile --path)/Makefile.Include
 

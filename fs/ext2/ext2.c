@@ -2551,7 +2551,7 @@ static inline unsigned long u32_to_ul(u32 * v) { return *v; }
 static inline unsigned u16_to_u(u16 * v) { return *v; }
 static inline unsigned u08_to_u(u8  * v) { return *v; }
 
-bool ext2_fsck(const char * _name) {
+bool fsck(const char * _name) {
 	struct scan_context * sc = NULL;
 	struct super_block * sb2 = NULL;
 	struct group_desciptor_v1 * gdt2v1 = NULL;

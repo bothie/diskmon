@@ -108,25 +108,6 @@ int main(int argc,char * argv[]) {
 		free(driver_name);
 	}
 	
-	char * filename="ext2.so";
-	void * ext2_driver=dlopen(filename,RTLD_NOW|RTLD_GLOBAL);
-	if (!ext2_driver) {
-		eprintf("Couldn't load %s",filename);
-		eprintf("dlerror: %s\n",dlerror());
-		exit(2);
-	}
-	
-	bool (*ext2_fsck)(char * name);
-	ext2_fsck=(bool (*)(char *))dlsym(ext2_driver,"ext2_fsck");
-	if (!ext2_fsck) {
-		eprintf("Couldn't lookup %s","ext2_fsck");
-		exit(2);
-	}
-	
-	ext2_fsck("platz/home");
-	ext2_fsck("root");
-	ext2_fsck("aesraid5/home");
-	
 	exit(0);
 	
 /*
