@@ -29,18 +29,18 @@ bool raid6_verify_parity=true;
 /*
  * Indirect public interface (via struct dev)
  */
-static block_t raid6_read(void * _private,block_t first,block_t num,unsigned char * data);
-static block_t raid6_data_read(void * _private,block_t first,block_t num,u8 * data);
-static block_t raid6_write(void * _private,block_t first,block_t num,const unsigned char * data);
-static bool raid6_destroy(void * _private);
+static block_t raid6_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u8 * data);
+static block_t raid6_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
+static bool raid6_destroy(struct bdev * bdev);
 
 static struct bdev * raid6_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
-static bool raid6_component_destroy(void * _private);
-static block_t raid6_component_read(void * _private,block_t first,block_t num,unsigned char * data);
+static bool raid6_component_destroy(struct bdev * bdev);
+static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
 
-static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * data,u8 * error_map);
-static block_t raid6_data_write(void * _private,block_t first,block_t num,const u8 * data);
+static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map);
+static block_t raid6_data_write(struct bdev * bdev, block_t first, block_t num, const u8 * data);
 
 static bool initialized;
 
@@ -1235,8 +1235,7 @@ err:
 	return NULL;
 }
 
-static bool raid6_destroy(void * _private) {
-	struct raid6_dev * private=(struct raid6_dev *)_private;
+static bool raid6_destroy_private(struct raid6_dev * private) {
 	if (!--private->refcount) {
 		free(private->disk);
 		free(private);
@@ -1244,9 +1243,14 @@ static bool raid6_destroy(void * _private) {
 	return true;
 }
 
-static bool raid6_component_destroy(void * _private) {
-	struct raid6_component_dev * private=(struct raid6_component_dev *)_private;
-	raid6_destroy(private->full_raid);
+static bool raid6_destroy(struct bdev * bdev) {
+	BDEV_PRIVATE(struct raid6_dev);
+	return raid6_destroy_private(private);
+}
+
+static bool raid6_component_destroy(struct bdev * bdev) {
+	BDEV_PRIVATE(struct raid6_component_dev);
+	raid6_destroy_private(private->full_raid);
 	free(private);
 	return true;
 }
@@ -1912,9 +1916,13 @@ regen_permutation:
 	return true;
 } // static bool raid6_read_stripe()
 
-static block_t raid6_component_read(void * _private,block_t first,block_t num,unsigned char * data) {
-	struct raid6_component_dev * real_private=(struct raid6_component_dev *)_private;
-	struct raid6_dev * private=real_private->full_raid;
+static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+	struct raid6_component_dev * real_private;
+	{
+		BDEV_PRIVATE(struct raid6_component_dev);
+		real_private = private;
+	}
+	struct raid6_dev * private = real_private->full_raid;
 	
 	off_t bs=bdev_get_block_size(private->disk[0].bdev);
 	block_t cs=private->chunk_size_Blocks;
@@ -1954,14 +1962,15 @@ static block_t raid6_component_read(void * _private,block_t first,block_t num,un
 	return retval;
 }
 
-static block_t raid6_read(void * _private,block_t first,block_t num,unsigned char * data) {
+static block_t raid6_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
 //	eprintf("raid6_read: ");
-	return raid6_short_read(_private,first,num,data,NULL);
+	return raid6_short_read(bdev, first, num, data, NULL);
 }
 
-static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * data,u8 * error_map) {
-//	eprintf("raid6_short_read(%p,%llu,%llu,%p,%p)\n",_private,(unsigned long long)first,(unsigned long long)num,data,error_map);
-	struct raid6_dev * private=(struct raid6_dev *)_private;
+static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map) {
+	BDEV_PRIVATE(struct raid6_dev);
+//	eprintf("raid6_short_read(%p,%llu,%llu,%p,%p)\n",(void*)private,(unsigned long long)first,(unsigned long long)num,data,error_map);
+	
 	unsigned bs=bdev_get_block_size(private->disk[0].bdev);
 	
 	/*
@@ -2176,7 +2185,7 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 				if (errno==ENOEXEC) errno=EIO;
 				if (0) eprintf(
 					"<< raid6_short_read(%p,%llu,%llu,%p) [FAILED(raid6_read_chunk)]\n"
-					,_private
+					,(void*)private
 					,(unsigned long long)first
 					,(unsigned long long)(num+retval)
 					,data
@@ -2389,7 +2398,7 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 	
 	if (0) eprintf(
 		"<< raid6_short_read(%p,%llu,%llu,%p)=%llu\n"
-		,_private
+		,(void*)private
 		,(unsigned long long)first
 		,(unsigned long long)num
 		,data
@@ -2399,9 +2408,11 @@ static block_t raid6_short_read(void * _private,block_t first,block_t num,u8 * d
 	return retval;
 }
 
-static block_t raid6_write(void * _private,block_t first,block_t num,const unsigned char * data) {
+static block_t raid6_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
 	return 0;
-//	return raid6_data_write(_private,first,num,data);
+	/*
+	return raid6_data_write(bdev, first, num, data);
+	*/
 }
 
 /*
@@ -2412,11 +2423,12 @@ static block_t raid6_write(void * _private,block_t first,block_t num,const unsig
  * reads parity data to reconstruct data after a disk io error (or if the data 
  * is missing).
  */
-static block_t raid6_data_read(void * _private,block_t first,block_t num,u8 * data) {
-	struct raid6_dev * private=(struct raid6_dev *)_private;
+static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u8 * data) {
+	BDEV_PRIVATE(struct raid6_dev);
+	
 	if (debug_data_reader) eprintf(
 		"raid6_data_read(%p,%llu,%llu,%p)\n"
-		,_private
+		,(void*)private
 		,(unsigned long long)first
 		,(unsigned long long)num
 		,data
@@ -2643,7 +2655,7 @@ static block_t raid6_data_read(void * _private,block_t first,block_t num,u8 * da
 						if (errno==ENOEXEC) errno=EIO;
 						if (debug_data_reader) eprintf(
 							"<< raid6_data_read(%p,%llu,%llu,%p) [FAILED(raid6_read_stripe)]\n"
-							,_private
+							,(void*)private
 							,(unsigned long long)first
 							,(unsigned long long)(num+retval)
 							,data
@@ -2692,7 +2704,7 @@ static block_t raid6_data_read(void * _private,block_t first,block_t num,u8 * da
 	
 	if (debug_data_reader) eprintf(
 		"<< raid6_data_read(%p,%llu,%llu,%p)=%llu\n"
-		,_private
+		,(void*)private
 		,(unsigned long long)first
 		,(unsigned long long)num
 		,data
@@ -2709,11 +2721,12 @@ static block_t raid6_data_read(void * _private,block_t first,block_t num,u8 * da
  * This function writes the data colums but doesn't touch the parities in the 
  * process. So it is not senseful for normal disk operation.
  */
-static block_t raid6_data_write(void * _private,block_t first,block_t num,const u8 * data) {
-	struct raid6_dev * private=(struct raid6_dev *)_private;
+static block_t raid6_data_write(struct bdev * bdev, block_t first, block_t num, const u8 * data) {
+	BDEV_PRIVATE(struct raid6_dev);
+	
 	if (debug_data_writer) eprintf(
 		"raid6_data_write(%p,%llu,%llu,%p)\n"
-		,_private
+		,(void*)private
 		,(unsigned long long)first
 		,(unsigned long long)num
 		,data
@@ -2960,7 +2973,7 @@ static block_t raid6_data_write(void * _private,block_t first,block_t num,const 
 	
 	if (debug_data_writer) eprintf(
 		"<< raid6_data_writer(%p,%llu,%llu,%p)=%llu\n"
-		,_private
+		,(void*)private
 		,(unsigned long long)first
 		,(unsigned long long)num
 		,data

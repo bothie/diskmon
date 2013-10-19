@@ -55,10 +55,10 @@ struct lvm_bdev;
 
 static bool lvm_destroy(struct lvm_bdev * bdev);
 
-static block_t lv_read(void * _private,block_t first,block_t num,unsigned char * data);
-static block_t lv_write(void * _private,block_t first,block_t num,const unsigned char * data);
-static bool lv_destroy(void * _private);
-static block_t lv_short_read(void * _private,block_t first,block_t num,u8 * data,u8 * error_map);
+static block_t lv_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t lv_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
+static bool lv_destroy(struct bdev * bdev);
+static block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map);
 
 static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
@@ -1219,21 +1219,23 @@ bool lvm_destroy(struct lvm_bdev * lvm) {
 	return true;
 }
 
-bool lv_destroy(void * _private) {
-	struct lv_bdev * lv_bdev=(struct lv_bdev *)_private;
-	if (!--lv_bdev->vg->refcount) {
-		lvm_destroy(lv_bdev->vg);
+bool lv_destroy(struct bdev * bdev) {
+	BDEV_PRIVATE(struct lv_bdev);
+	
+	if (!--private->vg->refcount) {
+		lvm_destroy(private->vg);
 	}
-	free(lv_bdev);
+	free(private);
 	return true;
 }
 
-block_t lv_read(void * _private,block_t first,block_t num,u8 * data) {
-	return lv_short_read(_private,first,num,data,NULL);
+block_t lv_read(struct bdev * bdev, block_t first, block_t num, u8 * data) {
+	return lv_short_read(bdev, first, num, data, NULL);
 }
 
-block_t lv_short_read(void * _private,block_t first,block_t num,u8 * data,u8 * error_map) {
-	struct lv_bdev * lv_bdev=(struct lv_bdev *)_private;
+block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map) {
+	BDEV_PRIVATE(struct lv_bdev); struct lv_bdev * lv_bdev = private;
+	
 //	struct bdev * * vg_bdev=lv_bdev->vg->bdev;
 	struct conf * conf=lv_bdev->vg->conf;
 	struct lv_in_core * lv=&VAACCESS(conf->lv,lv_bdev->lvnum);
@@ -1298,8 +1300,9 @@ block_t lv_short_read(void * _private,block_t first,block_t num,u8 * data,u8 * e
 	return retval;
 }
 
-block_t lv_write(void * _private,block_t first,block_t num,const unsigned char * data) {
-	struct lv_bdev * lv_bdev=(struct lv_bdev *)_private;
+block_t lv_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
+	BDEV_PRIVATE(struct lv_bdev); struct lv_bdev * lv_bdev = private;
+	
 //	struct bdev * * vg_bdev=lv_bdev->vg->bdev;
 	struct conf * conf=lv_bdev->vg->conf;
 	struct lv_in_core * lv=&VAACCESS(conf->lv,lv_bdev->lvnum);

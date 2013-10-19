@@ -31,10 +31,10 @@
  * Indirect public interface (via struct dev)
  */
  
-static block_t dmcrypt_read(void * _private,block_t first,block_t num,unsigned char * data);
-static block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned char * data);
+static block_t dmcrypt_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t dmcrypt_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 
-static bool dmcrypt_destroy(void * _private);
+static bool dmcrypt_destroy(struct bdev * bdev);
 
 static struct bdev * dmcrypt_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
@@ -430,10 +430,10 @@ static bool dmcrypt_decrypt_block(
 	return true;
 }
 
-static block_t dmcrypt_read(void * _private,block_t first,block_t num,unsigned char * data) {
-	struct dmcrypt_bdev * dev=(struct dmcrypt_bdev *)_private;
+static block_t dmcrypt_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+	BDEV_PRIVATE(struct dmcrypt_bdev);
 	
-	num=bdev_read(dev->backing_dev,first+1,num,data);
+	num = bdev_read(private->backing_dev, first+1, num, data);
 	
 	if (num==(block_t)-1) return num;
 	
@@ -459,7 +459,7 @@ static block_t dmcrypt_read(void * _private,block_t first,block_t num,unsigned c
 			,data
 		);
 */
-		if (!dmcrypt_decrypt_block(first,data,dev->key,dev->iv)) {
+		if (!dmcrypt_decrypt_block(first, data, private->key, private->iv)) {
 			return -1;
 		}
 		
@@ -474,7 +474,7 @@ static block_t dmcrypt_read(void * _private,block_t first,block_t num,unsigned c
 		
 		memcpy(reencrypted,data,512);
 		
-		dmcrypt_encrypt_block(first,reencrypted,dev->key,dev->iv);
+		dmcrypt_encrypt_block(first, reencrypted, private->key, private->iv);
 		
 		eprintf("RE:");
 		for (size_t i=0;i<16;++i) {
@@ -489,17 +489,17 @@ static block_t dmcrypt_read(void * _private,block_t first,block_t num,unsigned c
 #endif // #ifdef VERIFY_ENCRYPTION
 		
 /*
-		struct crypt_alg_ctx * ctx=dev->key->makectx(dev->key);
+		struct crypt_alg_ctx * ctx = private->key->makectx(private->key);
 		if (!ctx) {
 			ERROR("Couldn't create cipher ctx.");
 			return -1;
 		}
 		
 		unsigned bs=ctx->key->alg->block_size;
-		assert(bs == dev->iv->iv_size);
+		assert(bs == private->iv->iv_size);
 		u32 iv[bs/4];
-		// dev->iv->use(ctx,first);
-		dev->iv->generate(iv,first);
+		// private->iv->use(ctx, first);
+		private->iv->generate(iv, first);
 		u32 tmp[bs/4];
 		for (int i=512/bs;i--;) {
 			ctx->decrypt(ctx,data,tmp);
@@ -549,8 +549,8 @@ static unsigned int cbc_process_encrypt(const struct cipher_desc *desc,
 
 /*
  * BROKEN:
-block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned char * data) {
-	struct dmcrypt_bdev * dev=(struct dmcrypt_bdev *)_private;
+block_t dmcrypt_write(struct bdev * bdev,block_t first,block_t num,const unsigned char * data) {
+	BDEV_PRIVATE(struct dmcrypt_bdev);
 	
 	block_t n=num;
 	block_t f=first;
@@ -562,16 +562,16 @@ block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned c
 	
 	unsigned char * eptr=encrypted;
 	while (n) {
-		dmcrypt_encrypt_block(first,reencrypted,dev->key,dev->iv);
+		dmcrypt_encrypt_block(first, reencrypted, private->key, private->iv);
 		
-		// dmcrypt_encrypt_block(first,reencrypted,dev->key,dev->iv);
-		struct crypt_alg_ctx * ctx=dev->key->makectx(dev->key);
+		// dmcrypt_encrypt_block(first, reencrypted, private->key, private->iv);
+		struct crypt_alg_ctx * ctx = private->key->makectx(private->key);
 		if (!ctx) {
 			ERROR("Couldn't create cipher ctx.");
 			return -1;
 		}
 		
-//		dev->iv->use(ctx,f);
+//		private->iv->use(ctx, f);
 		for (int i=512/ctx->key->alg->block_size;i--;) {
 			ctx->encrypt(ctx,data,eptr);
 			data+=ctx->key->alg->block_size;
@@ -582,7 +582,7 @@ block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned c
 		--n;
 	}
 	
-	block_t retval=bdev_write(dev->backing_dev,first+1,num,encrypted);
+	block_t retval = bdev_write(private->backing_dev, first+1, num, encrypted);
 	
 	free(encrypted);
 	
@@ -590,8 +590,8 @@ block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned c
 }
 */
 
-static block_t dmcrypt_write(void * _private,block_t first,block_t num,const unsigned char * data) {
-	struct dmcrypt_bdev * dev=(struct dmcrypt_bdev *)_private;
+static block_t dmcrypt_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
+	BDEV_PRIVATE(struct dmcrypt_bdev);
 	
 	block_t n=num;
 	
@@ -615,7 +615,8 @@ static block_t dmcrypt_write(void * _private,block_t first,block_t num,const uns
 			,data
 		);
 */
-		if (!dmcrypt_encrypt_block(first,data,dev->key,dev->iv)) {
+		#warning FIXME: Get rid of in-place encryption prior to writing because this fails if either the data is stored in a read only location OR if in a multi threaded application the data is used by a different thread in parallel with being written
+		if (!dmcrypt_encrypt_block(first, data, private->key, private->iv)) {
 			return -1;
 		}
 		
@@ -630,7 +631,7 @@ static block_t dmcrypt_write(void * _private,block_t first,block_t num,const uns
 		
 		memcpy(redecrypted,data,512);
 		
-		dmcrypt_decrypt_block(first,redecrypted,dev->key,dev->iv);
+		dmcrypt_decrypt_block(first, redecrypted, private->key, private->iv);
 		
 		eprintf("RD:");
 		for (size_t i=0;i<16;++i) {
@@ -645,17 +646,17 @@ static block_t dmcrypt_write(void * _private,block_t first,block_t num,const uns
 #endif // #ifdef VERIFY_ENCRYPTION
 		
 /*
-		struct crypt_alg_ctx * ctx=dev->key->makectx(dev->key);
+		struct crypt_alg_ctx * ctx = private->key->makectx(private->key);
 		if (!ctx) {
 			ERROR("Couldn't create cipher ctx.");
 			return -1;
 		}
 		
 		unsigned bs=ctx->key->alg->block_size;
-		assert(bs == dev->iv->iv_size);
+		assert(bs == private->iv->iv_size);
 		u32 iv[bs/4];
-		// dev->iv->use(ctx,first);
-		dev->iv->generate(iv,first);
+		// private->iv->use(ctx, first);
+		private->iv->generate(iv, first);
 		u32 tmp[bs/4];
 		for (int i=512/bs;i--;) {
 			ctx->decrypt(ctx,data,tmp);
@@ -675,13 +676,13 @@ static block_t dmcrypt_write(void * _private,block_t first,block_t num,const uns
 	data-=512*num;
 	first-=num;
 	
-	return bdev_write(dev->backing_dev,first+1,num,data);
+	return bdev_write(private->backing_dev, first + 1, num, data);
 }
 
-bool dmcrypt_destroy(void * _private) {
-	struct dmcrypt_bdev * dev=(struct dmcrypt_bdev *)_private;
+bool dmcrypt_destroy(struct bdev * bdev) {
+	BDEV_PRIVATE(struct dmcrypt_bdev);
 	
-	free(dev);
+	free(private);
 	
 	return true;
 }

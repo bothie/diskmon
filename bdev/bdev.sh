@@ -12,63 +12,71 @@ EOF
 	echo "#define BDEV_CLEAR_FUNCTION_POINTERS(bdev) do {\\" >&6
 	for name in destroy read write short_read mmapro mmaprw munmap
 	do
-		rettype=""
-		arglist=""
-		reterror=""
-		args=""
-		cleanup_code=""
+		rettype="&error"
+		arglist="%error"
+		reterror="§error"
+		args="!error"
+		cleanup_code=")error"
 		
 		case "$name" in
 			destroy)
 				rettype="bool"
+				arglist=""
 				reterror="false"
+				args=""
 				cleanup_code="
-					bdev_deregister_bdev(dev);
-					free(dev->name);
-					free(dev);
+					bdev_deregister_bdev(bdev);
+					free(bdev->name);
+					free(bdev);
 				"
 				;;
 			
 			read)
 				rettype="block_t"
-				arglist=",block_t first,block_t num,unsigned char * data"
+				arglist="block_t first, block_t num, unsigned char * data"
 				reterror="-1"
-				args=",first,num,data"
+				args="first, num, data"
+				cleanup_code=""
 				;;
 			
 			write)
 				rettype="block_t"
-				arglist=",block_t first,block_t num,const unsigned char * data"
+				arglist="block_t first, block_t num, const unsigned char * data"
 				reterror="-1"
-				args=",first,num,data"
+				args="first, num, data"
+				cleanup_code=""
 				;;
 			
 			short_read)
 				rettype="block_t"
-				arglist=",block_t first,block_t num,unsigned char * data,unsigned char * error_map"
+				arglist="block_t first, block_t num, unsigned char * data, unsigned char * error_map"
 				reterror="-1"
-				args=",first,num,data,error_map"
+				args="first, num, data, error_map"
+				cleanup_code=""
 				;;
 			
 			mmapro)
 				rettype="unsigned char *"
-				arglist=",block_t first,block_t num"
+				arglist="block_t first, block_t num"
 				reterror="NULL"
-				args=",first,num"
+				args="first, num"
+				cleanup_code=""
 				;;
 			
 			mmaprw)
 				rettype="unsigned char *"
-				arglist=",block_t first,block_t num"
+				arglist="block_t first, block_t num"
 				reterror="NULL"
-				args=",first,num"
+				args="first, num"
+				cleanup_code=""
 				;;
 			
 			munmap)
 				rettype="void"
-				arglist=",unsigned char * address,block_t num"
+				arglist="unsigned char * address, block_t num"
 				reterror=""
-				args=",address,num"
+				args="address, num"
+				cleanup_code=""
 				;;
 			
 			new)
@@ -77,52 +85,86 @@ EOF
 				reterror=""
 				args=""
 				cleanup_code=""
+				echo "Error in script $0: Unknown function named $name" >&2
+				exit 2
 				;;
+			
+			*)
+				echo "Error in script $0: Unknown function named $name" >&2
+				exit 2
 		esac
 		
 		namefunc="${name}_function"
 		typename="bdev_$namefunc"
 		
-		echo -e "\tbdev->$name=NULL;\\" >&6
+		echo -e "\tbdev->$name = NULL;\\" >&6
 		
 		(
 			echo -e  "\t$typename $name;"
 		) >&5
 		
 		(
-			echo "typedef $rettype(*$typename)(void * _private $arglist);"
-			echo "$typename bdev_get_$namefunc(struct bdev * dev);"
-			echo "$typename bdev_set_$namefunc(struct bdev * dev,$typename new_$namefunc);"
-			echo "$rettype bdev_$name(struct bdev * dev $arglist);"
+			if test -n "$arglist"
+			then
+				echo "typedef $rettype(*$typename)(struct bdev * bdev, $arglist);"
+			else
+				echo "typedef $rettype(*$typename)(struct bdev * bdev);"
+			fi
+			echo "$typename bdev_get_$namefunc(struct bdev * bdev);"
+			echo "$typename bdev_set_$namefunc(struct bdev * bdev, $typename new_$namefunc);"
+			if test -n "$arglist"
+			then
+				echo "$rettype bdev_$name(struct bdev * bdev, $arglist);"
+			else
+				echo "$rettype bdev_$name(struct bdev * bdev);"
+			fi
 			echo
 		) >&3
 		
 		(
-			echo     "$rettype bdev_$name(struct bdev * dev $arglist) {"
-			echo -e  "\tif (unlikely(!dev->$name)) {"
-			echo -e  "\t\terrno=ENOSYS;"
+			if test -n "$arglist"
+			then
+				echo     "$rettype bdev_$name(struct bdev * bdev, $arglist) {"
+			else
+				echo     "$rettype bdev_$name(struct bdev * bdev) {"
+			fi
+			echo -e  "\tif (unlikely(!bdev->$name)) {"
+			echo -e  "\t\terrno = ENOSYS;"
 			echo -e  "\t\treturn $reterror;"
 			echo -e  "\t}"
+			echo -e  "\t"
 			echo -en "\t"
 			if test "$rettype" != "void"
 			then
-				echo -n "$rettype retval="
+				echo -en "$rettype retval = "
 			fi
-			echo -e  "dev->$name(dev->private $args);"
-			echo -e  "\t{ $cleanup_code }"
+			if test -n "$args"
+			then
+				echo -e  "bdev->$name(bdev, $args);"
+			else
+				echo -e  "bdev->$name(bdev);"
+			fi
+			if test -n "$cleanup_code"
+			then
+				echo -e  "\t"
+				echo -e  "\t{"
+				echo "$cleanup_code"
+				echo -e  "\t}"
+			fi
 			if test "$rettype" != "void"
 			then
+				echo -e  "\t"
 				echo -e  "\treturn retval;"
 			fi
 			echo     "}"
 			echo
-			echo     "$typename bdev_get_$namefunc(struct bdev * dev) {"
-			echo -e  "\treturn dev->$name;"
+			echo     "$typename bdev_get_$namefunc(struct bdev * bdev) {"
+			echo -e  "\treturn bdev->$name;"
 			echo     "}"
 			echo
-			echo     "$typename bdev_set_$namefunc(struct bdev * dev,$typename new_$namefunc) {"
-			echo -e  "\t$typename retval=dev->$name;"
-			echo -e  "\tdev->$name=new_$namefunc;"
+			echo     "$typename bdev_set_$namefunc(struct bdev * bdev, $typename new_$namefunc) {"
+			echo -e  "\t$typename retval = bdev->$name;"
+			echo -e  "\tbdev->$name = new_$namefunc;"
 			echo -e  "\treturn retval;"
 			echo     "}"
 			echo

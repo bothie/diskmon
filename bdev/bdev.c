@@ -156,6 +156,10 @@ unsigned bdev_get_block_size(const struct bdev * bdev) {
 	return bdev->block_size;
 }
 
+void * bdev_get_private(const struct bdev * bdev) {
+	return bdev->private;
+}
+
 #if 0
 block_t bdev_read(struct bdev * dev,block_t off,block_t num,unsigned char * buf) {
 /*

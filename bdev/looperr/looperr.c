@@ -49,10 +49,10 @@ static inline int gettid() {
 /*
  * Indirect public interface
  */
-static block_t looperr_read(void * _private,block_t first,block_t num,unsigned char * data);
-static block_t looperr_write(void * _private,block_t first,block_t num,const unsigned char * data);
+static block_t looperr_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t looperr_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 
-static bool looperr_destroy(void * _private);
+static bool looperr_destroy(struct bdev * bdev);
 
 static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
@@ -82,6 +82,8 @@ struct looperr_dev {
 	struct btlock_lock * lock;
 	struct bdev * bdev;
 };
+
+static bool looperr_destroy_private(struct looperr_dev * private);
 
 // <filename>
 //
@@ -211,15 +213,14 @@ err_msg_open:
 	ERRORF("looperr_init:%u: Couldn't open %s: %s.",line,args,(pwerrno==PW_ERRNO)?strerror(errno):pwerror(pwerrno));
 err:
 	if (private) {
-		looperr_destroy(private);
+		looperr_destroy_private(private);
 	}
 	free(name);
 	return NULL;
 }
 
-static bool looperr_destroy(void * _private) {
 //	raid6_sync(dev);
-	struct looperr_dev * private=(struct looperr_dev *)_private;
+bool looperr_destroy_private(struct looperr_dev * private) {
 	btlock_lock_free(private->lock);
 	if (private->fd>=0) {
 		close(private->fd);
@@ -229,6 +230,11 @@ static bool looperr_destroy(void * _private) {
 	}
 	free(private);
 	return true;
+}
+
+bool looperr_destroy(struct bdev * bdev) {
+	BDEV_PRIVATE(struct looperr_dev);
+	return looperr_destroy_private(private);
 }
 
 static bool looperr_access_one_block(
@@ -355,15 +361,19 @@ static block_t looperr_access(
 	return retval;
 }
 
-static block_t looperr_read(void * _private,block_t first,block_t num,unsigned char * data) {
-	return looperr_access((struct looperr_dev *)_private,first,num,data,false);
+static block_t looperr_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+	BDEV_PRIVATE(struct looperr_dev);
+	
+	return looperr_access(private, first, num, data, false);
 }
 
-static block_t looperr_write(void * _private,block_t first,block_t num,const unsigned char * data) {
+static block_t looperr_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
+	BDEV_PRIVATE(struct looperr_dev);
+	
 	/*
 	 * Sadly we have to cast away that const qualifiers. But if we don't 
 	 * do it here, we'd have to do it in looperr_access or 
 	 * looperr_access_one_block anyways, so just do it here.
 	 */
-	return looperr_access((struct looperr_dev *)_private,first,num,(unsigned char *)data,true);
+	return looperr_access(private, first, num, (unsigned char *)data, true);
 }

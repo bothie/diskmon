@@ -44,10 +44,10 @@ static inline int gettid() {
 /*
  * Indirect public interface
  */
-static block_t loop_read(void * _private,block_t first,block_t num,unsigned char * data);
-static block_t loop_write(void * _private,block_t first,block_t num,const unsigned char * data);
+static block_t loop_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t loop_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 
-static bool loop_destroy(void * _private);
+static bool loop_destroy(struct bdev * bdev);
 
 static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
@@ -76,6 +76,8 @@ struct loop_dev {
 	struct btlock_lock * lock;
 	struct bdev * bdev;
 };
+
+static bool loop_destroy_private(struct loop_dev * private);
 
 // <filename>
 //
@@ -171,16 +173,15 @@ struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char 
 
 err:
 	if (private) {
-		loop_destroy(private);
+		loop_destroy_private(private);
 	}
 	free(name);
 	free(filename);
 	return NULL;
 }
 
-static bool loop_destroy(void * _private) {
 //	raid6_sync(dev);
-	struct loop_dev * private=(struct loop_dev *)_private;
+bool loop_destroy_private(struct loop_dev * private) {
 	btlock_lock_free(private->lock);
 	if (private->fd>=0) {
 		close(private->fd);
@@ -189,7 +190,12 @@ static bool loop_destroy(void * _private) {
 	return true;
 }
 
-static block_t loop_read(void * _private,block_t first,block_t num,unsigned char * data) {
+static bool loop_destroy(struct bdev * bdev) {
+	BDEV_PRIVATE(struct loop_dev);
+	return loop_destroy_private(private);
+}
+
+static block_t loop_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
 	/*
 	struct timespec time;
 	time.tv_sec=0;
@@ -198,7 +204,9 @@ static block_t loop_read(void * _private,block_t first,block_t num,unsigned char
 		eprintf("nanosleep: %s\n",strerror(errno));
 	}
 	*/
-	struct loop_dev * private=(struct loop_dev *)_private;
+	
+	BDEV_PRIVATE(struct loop_dev);
+	
 	if ((first+num)>bdev_get_size(private->bdev)) {
 		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(private->bdev));
 		errno=EINVAL;
@@ -243,8 +251,9 @@ static block_t loop_read(void * _private,block_t first,block_t num,unsigned char
 	return r;
 }
 
-static block_t loop_write(void * _private,block_t first,block_t num,const unsigned char * data) {
-	struct loop_dev * private=(struct loop_dev *)_private;
+static block_t loop_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
+	BDEV_PRIVATE(struct loop_dev);
+	
 	if ((first+num)>bdev_get_size(private->bdev)) {
 		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(private->bdev));
 		errno=EINVAL;

@@ -58,4 +58,7 @@ const char * bdev_get_name(const struct bdev * bdev);
 block_t bdev_get_size(const struct bdev * bdev);
 unsigned bdev_get_block_size(const struct bdev * bdev);
 
+void * bdev_get_private(const struct bdev * bdev);
+#define BDEV_PRIVATE(type) type * private = (type *)bdev_get_private(bdev)
+
 #endif // #ifndef BDEV_H
