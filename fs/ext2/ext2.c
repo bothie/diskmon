@@ -1162,7 +1162,7 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 	free(cbuffer);
 	exit_request_com_cache_thread=false;
 	GENERAL_BARRIER();
-	CCT_WAKE();
+	TRF_WAKE();
 	
 	eprintf("Returning from com_cache_thread (exiting cluster-owner-map-cache-thread)\n");
 	
@@ -4062,10 +4062,11 @@ recheck_compat_flags:
 		*/
 	}
 	gzclose(gzf);
+	TRF_WAIT(); // We misuse the table reader full lock to wait for the com cache thread to exit. However, TRF is known to be in the "waked" state right now, so wait for it once to reset it to default state.
 	exit_request_com_cache_thread=true;
 	GENERAL_BARRIER();
 	CCT_WAKE(); // Make sure, we won't wait senselessly for the com_cache_thread.
-	CCT_WAIT(); // Wait for that thread to exit
+	TRF_WAIT(); // And wait for that thread to exit
 	GENERAL_BARRIER();
 	assert(!exit_request_com_cache_thread);
 	
