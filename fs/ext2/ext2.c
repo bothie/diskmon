@@ -3904,7 +3904,8 @@ recheck_compat_flags:
 				}
 			}
 			
-			if (sc->gdt[group].flags & BG_INODE_TABLE_INITIALIZED) {
+			if (sc->gdt[group].flags & BG_INODE_TABLE_INITIALIZED
+			||  !(sc->sb->ro_compat & (RO_COMPAT_METADATA_CSUM | RO_COMPAT_GDT_CSUM))) {
 				for (unsigned ino=0;ino<sc->sb->inodes_per_group;++ino,++inode_num) {
 					PRINT_PROGRESS_BAR(inode_num);
 					
