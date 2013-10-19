@@ -54,8 +54,8 @@ struct bdev * bdev_register_bdev(
 
 struct bdev * bdev_lookup_bdev(const char * bdev_name);
 
-const char * bdev_get_name(struct bdev * bdev);
-block_t bdev_get_size(struct bdev * bdev);
-unsigned bdev_get_block_size(struct bdev * bdev);
+const char * bdev_get_name(const struct bdev * bdev);
+block_t bdev_get_size(const struct bdev * bdev);
+unsigned bdev_get_block_size(const struct bdev * bdev);
 
 #endif // #ifndef BDEV_H

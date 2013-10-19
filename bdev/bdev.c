@@ -144,15 +144,15 @@ struct bdev * bdev_lookup_bdev(const char * bdev_name) {
 	return NULL;
 }
 
-const char * bdev_get_name(struct bdev * bdev) {
+const char * bdev_get_name(const struct bdev * bdev) {
 	return bdev->name;
 }
 
-block_t bdev_get_size(struct bdev * bdev) {
+block_t bdev_get_size(const struct bdev * bdev) {
 	return bdev->size;
 }
 
-unsigned bdev_get_block_size(struct bdev * bdev) {
+unsigned bdev_get_block_size(const struct bdev * bdev) {
 	return bdev->block_size;
 }
 
