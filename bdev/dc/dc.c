@@ -90,7 +90,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 //	block_t max_blocks2=0;
 	
 	errno=0;
-	block_t size=strtoll(s,&p,0);
+	block_t size = strtoll(s, (char * *)&p, 0);
 //	eprintf("bdev_init: size=%llu, s=\"%s\", p=\"%s\"\n",(unsigned long long)size,s,p);
 	if (*p!=':'
 	||  ((size!=(block_t)-1) && (size>=LLONG_MAX || (size<0)))) {
@@ -164,12 +164,12 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		} else {
 			s=p+1;
 			errno=0;
-			dv->offset=strtoull(s,&p,0);
+			dv->offset = strtoull(s, (char * *)&p, 0);
 			if (dv->offset>=LLONG_MAX || dv->offset<0) {
 				ERRORF(
 					"Couldn't parse offset for %ith device (%s)."
-					,VASIZE(device)
-					,name
+					, (int)(VASIZE(device))
+					, name
 				);
 				goto err;
 			}
@@ -224,19 +224,19 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 				if (unlikely(addr==d->num_blocks)) {
 					eprintf(
 						"dc: EOF on %s reached @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
-						,d->name
-						,d->offset+addr
-						,d->offset+addr
-						,addr
-						,addr
+						, d->name
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(addr)
+						, (unsigned long long)(addr)
 					);
 					if (duplicate_errors_on_stdout) printf(
 						"dc: EOF on %s reached @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
-						,d->name
-						,d->offset+addr
-						,d->offset+addr
-						,addr
-						,addr
+						, d->name
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(addr)
+						, (unsigned long long)(addr)
 					);
 					PRINT_PROGRESS_BAR(addr);
 				}
@@ -266,19 +266,19 @@ retry:
 				}
 				eprintf(
 					"dc: Read error on device %s @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
-					,d->name
-					,d->offset+addr
-					,d->offset+addr
-					,addr
-					,addr
+					, d->name
+					, (unsigned long long)(d->offset + addr)
+					, (unsigned long long)(d->offset + addr)
+					, (unsigned long long)(addr)
+					, (unsigned long long)(addr)
 				);
 				if (duplicate_errors_on_stdout) printf(
 					"dc: Read error on device %s @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
-					,d->name
-					,d->offset+addr
-					,d->offset+addr
-					,addr
-					,addr
+					, d->name
+					, (unsigned long long)(d->offset + addr)
+					, (unsigned long long)(d->offset + addr)
+					, (unsigned long long)(addr)
+					, (unsigned long long)(addr)
 				);
 				d->ignore=true;
 				PRINT_PROGRESS_BAR(addr);
@@ -343,8 +343,16 @@ retry:
 					continue;
 				}
 				
-				eprintf("dc: Data mismatch(es) @ in logical block range %llu..%llu:",addr,addr+cs-1);
-				if (duplicate_errors_on_stdout) printf("dc: Data mismatch(es) @ in logical block range %llu..%llu:",addr,addr+cs-1);
+				eprintf(
+					"dc: Data mismatch(es) @ in logical block range %llu..%llu:"
+					, (unsigned long long)(addr)
+					, (unsigned long long)(addr+cs-1)
+				);
+				if (duplicate_errors_on_stdout) printf(
+					"dc: Data mismatch(es) @ in logical block range %llu..%llu:"
+					, (unsigned long long)(addr)
+					, (unsigned long long)(addr+cs-1)
+				);
 				bool first=true;
 				
 				for (j=i+1;j<VASIZE(device);++j) {
@@ -361,16 +369,32 @@ retry:
 						eprintf(" !=");
 						if (duplicate_errors_on_stdout) printf(" !=");
 					}
-					eprintf(" %s@%llu",di->name,di->offset+addr);
-					if (duplicate_errors_on_stdout) printf(" %s@%llu",di->name,di->offset+addr);
+					eprintf(
+						" %s@%llu"
+						, di->name
+						, (unsigned long long)(di->offset + addr)
+					);
+					if (duplicate_errors_on_stdout) printf(
+						" %s@%llu"
+						, di->name
+						, (unsigned long long)(di->offset+addr)
+					);
 					for (j=i+1;j<VASIZE(device);++j) {
 						struct dc * dj=&VAACCESS(device,j);
 						if (dj->ignore || dj->printed) {
 							continue;
 						}
 						if (!memcmp(di->buffer+mem_offset,dj->buffer+mem_offset,cs*block_size)) {
-							eprintf("==%s@%llu",dj->name,dj->offset+addr);
-							if (duplicate_errors_on_stdout) printf("==%s@%llu",dj->name,dj->offset+addr);
+							eprintf(
+								"==%s@%llu"
+								, dj->name
+								, (unsigned long long)(dj->offset + addr)
+							);
+							if (duplicate_errors_on_stdout) printf(
+								"==%s@%llu"
+								, dj->name
+								, (unsigned long long)(dj->offset + addr)
+							);
 							dj->printed=true;
 						}
 					}
