@@ -8,29 +8,29 @@
 #include <string.h>
 
 #define FMT(fmt, ...) do { \
-	char * msg = mprintf(fmt, __VA_ARGS__); \
-	if (!msg) { \
+	char * COMMON_FMT_MACRO_msg = mprintf(fmt, __VA_ARGS__); \
+	if (!COMMON_FMT_MACRO_msg) { \
 		eprintf(fmt, __VA_ARGS__); \
 		if (fmt[strlen(fmt)-1] != '\n') { \
 			eprintf("\n"); \
 		} \
 	} else { \
-		if (msg[strlen(msg)-1] != '\n') { \
-			eprintf("%s\n", msg); \
+		if (COMMON_FMT_MACRO_msg[strlen(COMMON_FMT_MACRO_msg)-1] != '\n') { \
+			eprintf("%s\n", COMMON_FMT_MACRO_msg); \
 		} else { \
-			eprintf("%s", msg); \
+			eprintf("%s", COMMON_FMT_MACRO_msg); \
 		} \
-		free(msg); \
+		free(COMMON_FMT_MACRO_msg); \
 	} \
 } while (0)
 
 #define JUSTPRINT(_x) do { \
-	char * x = (_x); \
+	char * COMMON_JUSTPRINT_MACRO_x = (_x); \
 	 \
-	if (x[strlen(x)-1] != '\n') { \
-		eprintf("%s\n",x); \
+	if (COMMON_JUSTPRINT_MACRO_x[strlen(COMMON_JUSTPRINT_MACRO_x)-1] != '\n') { \
+		eprintf("%s\n",COMMON_JUSTPRINT_MACRO_x); \
 	} else { \
-		eprintf("%s",x); \
+		eprintf("%s",COMMON_JUSTPRINT_MACRO_x); \
 	} \
 } while (0)
 
