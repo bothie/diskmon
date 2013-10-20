@@ -278,7 +278,6 @@ struct bdev * dmcrypt_init(struct bdev_driver * bdev_driver,char * name,const ch
 	private->backing_dev=bdev_lookup_bdev(backing_dev_name);
 	if (!private->backing_dev) {
 		ERRORF("Couldn't lookup device %s.",backing_dev_name);
-		free(backing_dev_name);
 		return NULL;
 	}
 	
