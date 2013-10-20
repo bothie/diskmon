@@ -180,7 +180,6 @@ err:
 	return NULL;
 }
 
-//	raid6_sync(dev);
 bool loop_destroy_private(struct loop_dev * private) {
 	btlock_lock_free(private->lock);
 	if (private->fd>=0) {
@@ -191,6 +190,7 @@ bool loop_destroy_private(struct loop_dev * private) {
 }
 
 static bool loop_destroy(struct bdev * bdev) {
+//	raid6_sync(dev);
 	BDEV_PRIVATE(struct loop_dev);
 	return loop_destroy_private(private);
 }

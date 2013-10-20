@@ -219,7 +219,6 @@ err:
 	return NULL;
 }
 
-//	raid6_sync(dev);
 bool looperr_destroy_private(struct looperr_dev * private) {
 	btlock_lock_free(private->lock);
 	if (private->fd>=0) {
