@@ -1110,6 +1110,7 @@ print_err:
 	}
 	private->this=retval;
 	bdev_set_read_function(retval,raid6_read);
+//	bdev_set_write_function(retval,raid6_write);
 //	bdev_set_read_function(retval,raid6_data_read);
 //	bdev_set_write_function(retval,raid6_data_write);
 //	bdev_set_short_read_function(retval,raid6_short_read);
