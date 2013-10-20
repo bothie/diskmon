@@ -2409,6 +2409,10 @@ static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, 
 }
 
 static block_t raid6_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
+	ignore(bdev);
+	ignore(first);
+	ignore(num);
+	ignore(data);
 	return 0;
 	/*
 	return raid6_data_write(bdev, first, num, data);
