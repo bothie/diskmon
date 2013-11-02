@@ -108,6 +108,8 @@ int main(int argc,char * argv[]) {
 		free(driver_name);
 	}
 	
+	eprintf("main.c: Quitting\n");
+	
 	exit(0);
 	
 /*
