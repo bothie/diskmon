@@ -84,14 +84,6 @@ int main(int argc,char * argv[]) {
 		name[p-start]=0;
 		++p;
 //		printf("\t\tname=\"%s\"\n",name);
-		if (bdev_lookup_bdev(name)) {
-			eprintf(
-				"Device with name %s already registered"
-				,name
-			);
-			free(name);
-			exit(2);
-		}
 //		printf("\t\targ=\"%s\"\n",p);
 //		printf("\t\tinit=%p(name=\"%s\",p=\"%s\")\n",init,name,p);
 		char * name_copy=mstrcpy(name);
