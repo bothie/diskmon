@@ -5,10 +5,10 @@
 
 #include <btfileio.h>
 #include <btlock.h>
+#include <btstr.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <object.h>
-#include <parseutil.h>
 #include <set.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -140,24 +140,11 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 		goto err;
 	}
 	
-	unsigned line = -1;
+	private->cache_files_directory = mstrcpy(args);
 	
-	char * bdev_name;
-	
-	const char * cp = args;
-	char c;
-	
-	c = parse_c_string(&cp, true, &bdev_name, NULL);
-	if (c!=' ') { line=__LINE__; goto err_msg_open; }
-	if (!parse_skip(&cp, ' ')) { line=__LINE__; goto err_msg_open; }
-	c = parse_c_string(&cp, true, &private->cache_files_directory, NULL);
-	if (c) { line=__LINE__; goto err_msg_open; }
-	
-	if (*cp) { line=__LINE__; goto err_msg_open; }
-	
-	private->backing_storage = bdev_lookup_bdev(bdev_name);
+	private->backing_storage = bdev_lookup_bdev(name);
 	if (!private->backing_storage) {
-		ERRORF("%s:%s: Couldn't lookup bdev %s.", DRIVER_NAME, name, bdev_name);
+		ERRORF("%s:%s: Couldn't lookup bdev.", DRIVER_NAME, name);
 		goto err;
 	}
 	
@@ -205,16 +192,6 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 		goto err;
 	}
 	
-	if (unlink(private->new.info_file_name) && errno != ENOENT) {
-		NOTIFYF("%s:%s: New info file %s exists and can't be deleted: %s,", DRIVER_NAME, name, private->new.info_file_name, strerror(errno));
-		goto err;
-	}
-	
-	if (unlink(private->new.data_file_name) && errno != ENOENT) {
-		NOTIFYF("%s:%s: New data file %s exists and can't be deleted: %s,", DRIVER_NAME, name, private->new.data_file_name, strerror(errno));
-		goto err;
-	}
-	
 	private->old.info_fd = open(private->old.info_file_name, O_RDONLY); e1 = errno;
 	
 	if (private->old.info_fd < 0 && e1 != ENOENT) {
@@ -243,20 +220,33 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 		goto err;
 	}
 	
+	if (unlink(private->new.info_file_name) && errno != ENOENT) {
+		NOTIFYF("%s:%s: New info file %s exists and can't be deleted: %s,", DRIVER_NAME, name, private->new.info_file_name, strerror(errno));
+		goto go_on_without_new;
+	}
+	
+	if (unlink(private->new.data_file_name) && errno != ENOENT) {
+		NOTIFYF("%s:%s: New data file %s exists and can't be deleted: %s,", DRIVER_NAME, name, private->new.data_file_name, strerror(errno));
+		goto go_on_without_new;
+	}
+	
 	private->new.info_fd = open(private->new.info_file_name, O_WRONLY|O_CREAT|O_TRUNC, 0666); e1 = errno;
 	
 	if (private->new.info_fd<0) {
-		ERRORF("%s:%s: Couldn't open new info file %s: %s.", DRIVER_NAME, name, private->new.info_file_name, strerror(e1));
-		goto err;
+		NOTIFYF("%s:%s: Couldn't open new info file %s: %s.", DRIVER_NAME, name, private->new.info_file_name, strerror(e1));
+		goto go_on_without_new;
 	}
 	
 	private->new.data_fd = open(private->new.data_file_name, O_WRONLY|O_CREAT|O_TRUNC, 0666); e2 = errno;
 	
 	if (private->new.data_fd<0) {
-		ERRORF("%s:%s: Couldn't open new data file %s: %s.", DRIVER_NAME, name, private->new.data_file_name, strerror(e2));
-		goto err;
+		close(private->new.info_fd); private->new.info_fd = -1;
+		unlink(private->new.info_file_name);
+		NOTIFYF("%s:%s: Couldn't open new data file %s: %s.", DRIVER_NAME, name, private->new.data_file_name, strerror(e2));
+		goto go_on_without_new;
 	}
 	
+go_on_without_new: ;
 	int info_file_size;
 	unsigned char * info_file_data;
 	if (private->old.info_fd != -1) {
@@ -298,6 +288,14 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 		NOTIFYF("%s:%s: Info file has bogus size %i. Something dividable by %i was expected.", DRIVER_NAME, name, info_file_size, (int)(sizeof(block_t) + sizeof(unsigned long)));
 	}
 	
+	char * target_name = NULL;
+	unsigned num = 0;
+	do {
+		free(target_name);
+		target_name = mprintf("%s.%u", name, ++num);
+	} while (!bdev_rename_bdev(private->backing_storage, target_name));
+	NOTIFYF("%s:%s: Renamed backing storage bdev to %s.\n", DRIVER_NAME, name, target_name);
+	
 	struct bdev * retval = bdev_register_bdev(
 		bdev_driver,
 		name,
@@ -316,17 +314,12 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 	
 	free(info_file_name);
 	free(data_file_name);
-	free(bdev_name);
 	
 	return retval;
 
-err_msg_open:
-	assert(line != (unsigned)-1);
-	ERRORF("%s:%s: looperr_init:%u: Couldn't open %s: %s.", DRIVER_NAME, name, line, args, (pwerrno==PW_ERRNO) ? strerror(errno) : pwerror(pwerrno));
 err:
 	free(info_file_name);
 	free(data_file_name);
-	free(bdev_name);
 	
 	if (private) {
 		cache_destroy_private(private);
@@ -420,6 +413,7 @@ static bool access_one_block(
 	struct block_lookup_entry ble_search;
 	ble_search.block = block;
 	struct block_lookup_entry * ble = set_find(private->block_lookup_set, &ble_search);
+	bool kill_ble = false;
 	if (!ble) {
 		block_t r = bdev_read(private->backing_storage, block, 1, data.wptr);
 		
@@ -429,6 +423,10 @@ static bool access_one_block(
 		
 		retval = true;
 		
+		if (private->new.info_fd == -1) {
+			goto out;
+		}
+		
 		ble = malloc(sizeof(*ble));
 		ble->block = block;
 		ble->old_entry = -1;
@@ -436,8 +434,7 @@ static bool access_one_block(
 		
 		if (!set_add(private->block_lookup_set, ble)) {
 			ERRORF("%s:%s: Couldn't add block %llu (%p) to block lookup table: %s.", DRIVER_NAME, bdev_get_name(bdev), (unsigned long long)ble->block, (void *)ble, strerror(errno));
-			free(ble);
-			ble = set_find(private->block_lookup_set, &ble_search);
+			kill_ble = true;
 			unlink(private->new.info_file_name); close(private->new.info_fd); private->new.info_fd = -1;
 			unlink(private->new.data_file_name); close(private->new.data_fd); private->new.data_fd = -1;
 		}
@@ -446,30 +443,35 @@ static bool access_one_block(
 			assert(VAACCESS(private->old.data, ble->old_entry).block == block);
 			if (!VAACCESS(private->old.data, ble->old_entry).num_accesses) {
 				ble->old_entry = -1;
+				assert(!VAACCESS(private->old.data, ble->old_entry).data);
 				goto direct_read;
 			}
-			while (!VAACCESS(private->old.data, ble->old_entry).data) {
-				if (private->num_blocks_cached == MAX_BLOCKS_CACHED) {
-					ERRORF("%s:%s: Max blocks cached reached. Skipping cache for access to block %llu.", DRIVER_NAME, bdev_get_name(bdev), (unsigned long long)block);
+			if (!VAACCESS(private->old.data, ble->old_entry).data) {
+				while (private->num_blocks_cached < MAX_BLOCKS_CACHED && private->next_read_index < VASIZE(private->old.data)) {
+					VAACCESS(private->old.data, private->next_read_index).data = malloc(bs);
+					ssize_t r = read(private->old.data_fd, VAACCESS(private->old.data, private->next_read_index).data, bs);
+					if (bs != r) {
+						char * tmp = NULL;
+						ERRORF("%s:%s: Couldn't read block from cache data file: %s", DRIVER_NAME, bdev_get_name(bdev), r >= 0 ? tmp = mprintf("Short read. Premature EOF? r = %u", (unsigned)r) : strerror(errno));
+						free(tmp);
+						VAACCESS(private->old.data, private->next_read_index).num_accesses = 0;
+						long offset = bs * private->next_read_index;
+						if (offset != lseek(private->old.data_fd, offset, SEEK_SET)) {
+							ERRORF("%s:%s: Couldn't lseek to correct location after read error: %s.", DRIVER_NAME, bdev_get_name(bdev), strerror(errno));
+							// Make sure subsequent read attemts will fail
+							close(private->old.data_fd); private->old.data_fd = -1;
+						}
+						free(VAACCESS(private->old.data, private->next_read_index).data);
+						VAACCESS(private->old.data, private->next_read_index).data = NULL;
+					} else {
+						++private->num_blocks_cached;
+					}
+					++private->next_read_index;
+				}
+				if (!VAACCESS(private->old.data, ble->old_entry).data) {
+	//				NOTIFYF("%s:%s: Max blocks cached reached. Skipping cache for access to block %llu.", DRIVER_NAME, bdev_get_name(bdev), (unsigned long long)block);
 					goto direct_read;
 				}
-				VAACCESS(private->old.data, private->next_read_index).data = malloc(bs);
-				ssize_t r = read(private->old.data_fd, VAACCESS(private->old.data, private->next_read_index).data, bs);
-				if (bs != r) {
-					ERRORF("%s:%s: Couldn't read block from cache data file: %s", DRIVER_NAME, bdev_get_name(bdev), r >= 0 ? "Short read. Premature EOF?" : strerror(errno));
-					VAACCESS(private->old.data, private->next_read_index).num_accesses = 0;
-					long offset = bs * private->next_read_index;
-					if (offset != lseek(private->old.data_fd, offset, SEEK_SET)) {
-						ERRORF("%s:%s: Couldn't lseek to correct location after read error: %s.", DRIVER_NAME, bdev_get_name(bdev), strerror(errno));
-						// Make sure subsequent read attemts will fail
-						close(private->old.data_fd); private->old.data_fd = -1;
-					}
-					free(VAACCESS(private->old.data, private->next_read_index).data);
-					VAACCESS(private->old.data, private->next_read_index).data = NULL;
-				} else {
-					++private->num_blocks_cached;
-				}
-				++private->next_read_index;
 			}
 			memcpy(data.wptr, VAACCESS(private->old.data, ble->old_entry).data, bs);
 			retval = true;
@@ -514,29 +516,35 @@ direct_read: ;
 	if (e->num_accesses) {
 		offset += sizeof(block_t);
 	}
-	if (offset != lseek(private->new.info_fd, offset, SEEK_SET)) {
-		ERRORF("%s:%s: Seeking in new info file failed: %s.", DRIVER_NAME, bdev_get_name(bdev), strerror(errno));
-		unlink(private->new.info_file_name); close(private->new.info_fd); private->new.info_fd = -1;
-		unlink(private->new.data_file_name); close(private->new.data_fd); private->new.data_fd = -1;
-	}
-	if (!e->num_accesses) {
-		ssize_t w = write(private->new.info_fd, &e->block, sizeof(block_t));
-		if (w != sizeof(block_t)) {
-			ERRORF("%s:%s: Couldn't write info entry for new block: %s.", DRIVER_NAME, bdev_get_name(bdev), w >= 0 ? "Short write. Disk full?" : strerror(errno));
+	if (private->new.info_fd != -1) {
+		if (offset != lseek(private->new.info_fd, offset, SEEK_SET)) {
+			ERRORF("%s:%s: Seeking in new info file failed: %s.", DRIVER_NAME, bdev_get_name(bdev), strerror(errno));
 			unlink(private->new.info_file_name); close(private->new.info_fd); private->new.info_fd = -1;
 			unlink(private->new.data_file_name); close(private->new.data_fd); private->new.data_fd = -1;
-			goto out;
+		}
+		if (!e->num_accesses) {
+			ssize_t w = write(private->new.info_fd, &e->block, sizeof(block_t));
+			if (w != sizeof(block_t)) {
+				ERRORF("%s:%s: Couldn't write info entry for new block: %s.", DRIVER_NAME, bdev_get_name(bdev), w >= 0 ? "Short write. Disk full?" : strerror(errno));
+				unlink(private->new.info_file_name); close(private->new.info_fd); private->new.info_fd = -1;
+				unlink(private->new.data_file_name); close(private->new.data_fd); private->new.data_fd = -1;
+				goto out;
+			}
 		}
 	}
 	
 	++e->num_accesses;
 	
-	ssize_t w = write(private->new.info_fd, &e->num_accesses, sizeof(unsigned long));
-	if (w != sizeof(block_t)) {
-		ERRORF("%s:%s: Couldn't write info entry for block: %s.", DRIVER_NAME, bdev_get_name(bdev), w >= 0 ? "Short write. Disk full?" : strerror(errno));
-		unlink(private->new.info_file_name); close(private->new.info_fd); private->new.info_fd = -1;
-		unlink(private->new.data_file_name); close(private->new.data_fd); private->new.data_fd = -1;
-		goto out;
+	if (kill_ble) free(ble);
+	
+	if (private->new.info_fd != -1) {
+		ssize_t w = write(private->new.info_fd, &e->num_accesses, sizeof(unsigned long));
+		if (w != sizeof(block_t)) {
+			ERRORF("%s:%s: Couldn't write info entry for block: %s.", DRIVER_NAME, bdev_get_name(bdev), w >= 0 ? "Short write. Disk full?" : strerror(errno));
+			unlink(private->new.info_file_name); close(private->new.info_fd); private->new.info_fd = -1;
+			unlink(private->new.data_file_name); close(private->new.data_fd); private->new.data_fd = -1;
+			goto out;
+		}
 	}
 
 out:
