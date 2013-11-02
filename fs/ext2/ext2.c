@@ -2951,10 +2951,8 @@ found_superblock:
 		
 		if (sc->gdtv1) {
 			MALLOCBYTES(gdt2v1,sc->size_of_gdt_Blocks*sc->block_size);
-			eprintf("malloc(gdt2v1)=%p\n",(void*)gdt2v1);
 		} else {
 			MALLOCBYTES(gdt2v2,sc->size_of_gdt_Blocks*sc->block_size);
-			eprintf("malloc(gdt2v2)=%p\n",(void*)gdt2v2);
 		}
 		MALLOCBYTES(gdt2im,sc->num_groups * sizeof(*gdt2im));
 		
@@ -3157,9 +3155,12 @@ found_superblock:
 				
 				if (1) { // Deactivate for VALGRIND if you like
 					if (sc->size_of_gdt_Blocks!=bdev_read(sc->bdev,(sb_offset/sc->cluster_size_Blocks+1)*sc->cluster_size_Blocks,sc->size_of_gdt_Blocks,sc->gdtv1?(void*)gdt2v1:(void*)gdt2v2)) {
-						eprintf("\033[31m");
-						ERRORF("%s: Couldn't read group descriptor table of group %lu: %s.",sc->name,group,strerror(errno));
-						eprintf("\033[0m");
+						ERRORF(
+							"\033[31m%s: Couldn't read group descriptor table of group %lu: %s.\033[0m"
+							, sc->name
+							, group
+							, strerror(errno)
+						);
 					} else {
 						if (sc->gdtv1) {
 							gdt_disk2memory_v1(gdt2im,gdt2v1,sc->num_groups);
@@ -3768,7 +3769,6 @@ recheck_compat_flags:
 #ifdef COMC_IN_MEMORY
 	sc->comc.compr=malloc(sc->comc.size*sizeof(*sc->comc.compr));
 #endif // #ifdef COMC_IN_MEMORY
-	eprintf("sc->comc.ccgroup=malloc: %p..%p\n",(void*)sc->comc.ccgroup,((char*)sc->comc.ccgroup)+sc->comc.size*sizeof(*sc->comc.ccgroup)-1);
 	for (i=0;i<sc->comc.size;++i) {
 		sc->comc.ccgroup[i]=NULL;
 #ifdef COMC_IN_MEMORY
@@ -4370,10 +4370,8 @@ cleanup:
 				free(sc->comc.compr[i].ptr);
 			}
 		}
-		eprintf("free(sc->comc.compr (%p));\n",(void*)sc->comc.compr);
 		free(sc->comc.compr);
 #endif // #ifdef COMC_IN_MEMORY
-		eprintf("free(sc->comc.ccgroup (%p));\n",(void*)sc->comc.ccgroup);
 		free(sc->comc.ccgroup);
 		btlock_lock_free(sc->comc.debug_lock);
 		free(sc);
@@ -4399,7 +4397,7 @@ struct fs_inode {
 
 struct fs_inode * ext2_read_inode(struct scan_context * sc,u32 ino) {
 	struct fs_inode * retval=malloc(sizeof(*retval));
-	u32 bs=bdev_get_block_size(sc->bdev);
+	u32 bs=sc->block_size;
 	u8 block_buffer[bs];
 	u32 ino_group=(ino-1)/sc->sb->inodes_per_group;
 	u32 ino_block=(ino-1)%sc->sb->inodes_per_group*sizeof(retval->data)/bs;
