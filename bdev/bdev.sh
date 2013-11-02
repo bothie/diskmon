@@ -10,7 +10,7 @@ struct bdev {
 	
 EOF
 	echo "#define BDEV_CLEAR_FUNCTION_POINTERS(bdev) do {\\" >&6
-	for name in destroy read write short_read mmapro mmaprw munmap
+	for name in destroy read write short_read disaster_read mmapro mmaprw munmap
 	do
 		rettype="&error"
 		arglist="%error"
@@ -52,6 +52,14 @@ EOF
 				arglist="block_t first, block_t num, unsigned char * data, unsigned char * error_map"
 				reterror="-1"
 				args="first, num, data, error_map"
+				cleanup_code=""
+				;;
+			
+			disaster_read)
+				rettype="block_t"
+				arglist="block_t first, block_t num, unsigned char * data, unsigned char * error_map, const unsigned char * ignore_map"
+				reterror="-1"
+				args="first, num, data, error_map, ignore_map"
 				cleanup_code=""
 				;;
 			
