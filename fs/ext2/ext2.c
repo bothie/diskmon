@@ -1,5 +1,8 @@
 // -> define globally (or not) #define BTCLONE // broken on amd64?
 
+// #define ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
+// #define ALLOW_CONCURRENT_TABLE_READER
+
 #define __athlon__
 
 #include <btatomic.h>
@@ -1989,6 +1992,7 @@ void cluster_scan_inode(struct inode_scan_context * isc) {
 		isc->inode=i;
 	}
 	
+#ifdef ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 	if ((live_child<hard_child_limit && isc->inode->cluster[FIRST_TIND])
 	||  (live_child<soft_child_limit && isc->inode->cluster[FIRST_DIND])) {
 		try_clone=true;
@@ -2002,8 +2006,11 @@ void cluster_scan_inode(struct inode_scan_context * isc) {
 		}
 		*/
 	} else {
+#endif // #ifdef ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 		try_clone=false;
+#ifdef ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 	}
+#endif // #ifdef ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 	
 #ifdef BTCLONE
 	if (!try_clone || (t->tid=btclone(
@@ -3750,6 +3757,7 @@ recheck_compat_flags:
 	}
 	
 	{
+#ifdef ALLOW_CONCURRENT_TABLE_READER
 #ifdef BTCLONE
 		if (btclone(
 			&ext2_read_tables_stack_memory,
@@ -3768,11 +3776,14 @@ recheck_compat_flags:
 		)) {
 #endif // #ifdef BTCLONE, else
 			if (errno!=ENOSYS) eprintf("clone failed, now first we'll read in the tables and then process them (instead of doing both at the same time)\n");
+#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
 			sc->background=false;
-			ext2_read_tables(sc);
+#ifdef ALLOW_CONCURRENT_TABLE_READER
+//			ext2_read_tables(sc);
 		} else {
 			++live_child;
 		}
+#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
 	}
 	
 	struct progress_bar * live_child_progress_bar=progress_bar_mk(2,hard_child_limit);
@@ -3789,10 +3800,19 @@ recheck_compat_flags:
 			
 			print_stalled_progress_bar(live_child_progress_bar,live_child);
 			
-			while (sc->table_reader_group==group) {
-				PROGRESS_STALLED(inode_num);
-				TRE_WAIT();
+#ifdef ALLOW_CONCURRENT_TABLE_READER
+			if (sc->background) {
+				while (sc->table_reader_group==group) {
+					PROGRESS_STALLED(inode_num);
+					TRE_WAIT();
+				}
+			} else {
+#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
+				read_table_for_one_group(sc);
+				++sc->table_reader_group;
+#ifdef ALLOW_CONCURRENT_TABLE_READER
 			}
+#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
 			
 			{
 				process_table_for_group(group, sc);
