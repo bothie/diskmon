@@ -621,6 +621,8 @@ struct scan_context {
 	bool warn_atime;
 	bool warn_dtime_zero;
 	bool warn_dtime_nonzero;
+	
+	bool do_surface_scan;
 	bool show_cam_diffs;
 };
 
@@ -1646,8 +1648,44 @@ void chk_block(struct inode_scan_context * isc,int level,unsigned long cluster) 
 	
 	isc_schedule_cluster_add(isc,cluster);
 	
-	if (isc->is_dir && !level) {
-		process_dir_cluster(isc,cluster);
+	u32 pointer[isc->sc->num_clusterpointers];
+	void * ptr_pointer=(void *)pointer;
+	
+	if (!level) {
+		if (isc->is_dir) {
+			process_dir_cluster(isc,cluster);
+		} else if (isc->sc->do_surface_scan) {
+			u8 errormap[isc->sc->cluster_size_Bytes];
+			void * ptr_errormap = (void *)errormap;
+			u8 ignore_map[isc->sc->cluster_size_Bytes];
+			void * ptr_ignore_map = (void *)ignore_map;
+			memset(ignore_map, (isc->inode_num == 8) ? 0xff : 0x00, isc->sc->cluster_size_Bytes);
+			
+			if (isc->sc->cluster_size_Blocks != bdev_disaster_read(isc->sc->bdev, cluster * isc->sc->cluster_size_Blocks, isc->sc->cluster_size_Blocks, ptr_pointer, ptr_errormap, ptr_ignore_map)) {
+				ERRORF(
+					"%s: Inode %lu [%s]: Error while reading data cluster %lu: %s"
+					, isc->sc->name
+					, isc->inode_num
+					, isc->type
+					, cluster
+					, strerror(errno)
+				);
+				++isc->read_error_ind_clusters[level];
+			} else {
+				for (unsigned i = 0; i < isc->sc->cluster_size_Bytes; ++i) {
+					if (errormap[i] && isc->inode_num != 8) {
+						NOTIFYF(
+							"%s: Inode %lu [%s]: Received wrong data notification while reading data cluster %lu"
+							, isc->sc->name
+							, isc->inode_num
+							, isc->type
+							, cluster
+						);
+						break;
+					}
+				}
+			}
+		}
 	}
 	
 	++isc->used_clusters;
@@ -2673,7 +2711,9 @@ bool fsck(const char * _name) {
 	
 	MALLOC1(sc);
 	
+	sc->do_surface_scan = true;
 	sc->show_cam_diffs = false;
+	
 	/*
 	 * The following three errors are VERY common to not cleanly 
 	 * unmounted file systems. So, per default, ignore them.
