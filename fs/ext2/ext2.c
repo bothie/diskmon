@@ -620,6 +620,7 @@ struct scan_context {
 	bool warn_atime;
 	bool warn_dtime_zero;
 	bool warn_dtime_nonzero;
+	bool show_cam_diffs;
 };
 
 bool read_super(struct scan_context * sc,struct super_block * sb,unsigned group,block_t offset,bool probing) {
@@ -2576,6 +2577,7 @@ bool fsck(const char * _name) {
 	
 	MALLOC1(sc);
 	
+	sc->show_cam_diffs = false;
 	/*
 	 * The following three errors are VERY common to not cleanly 
 	 * unmounted file systems. So, per default, ignore them.
@@ -4099,42 +4101,44 @@ recheck_compat_flags:
 	*/
 	eprintf("Finisched building calculated_cluster_allocation_map from cluster_owning_map\n");
 	
-	if (memcmp(sc->cluster_allocation_map,sc->calculated_cluster_allocation_map,(size_t)sc->cluster_size_Bytes*(size_t)sc->num_groups)) {
-		eprintf("%s: cluster allocation map differs:",sc->name);
-		bool valid_problem_range=false;
-		bool really_allocated=true;
-		u32 first_cluster=0;
-		for (u32 cluster=1;cluster<sc->sb->num_clusters;++cluster) {
-			bool on_disk_flag=get_cluster_allocation_map_bit(sc,cluster);
-			bool calculated_flag=get_calculated_cluster_allocation_map_bit(sc,cluster);
-			bool print=false;
-			bool new_range=false;
-			
-			if (likely(on_disk_flag==calculated_flag)) {
-				if (unlikely(valid_problem_range)) {
-					print=true;
-				}
-			} else {
-				if (likely(!valid_problem_range) || unlikely(really_allocated!=calculated_flag)) {
-					new_range=true;
-					if (likely(valid_problem_range)) {
-						print=true;
+	if (memcmp(sc->cluster_allocation_map, sc->calculated_cluster_allocation_map, (size_t)sc->cluster_size_Bytes * (size_t)sc->num_groups)) {
+		eprintf("%s: cluster allocation map differs%c", sc->name, sc->show_cam_diffs ? ':' : '!');
+		if (sc->show_cam_diffs) {
+			bool valid_problem_range = false;
+			bool really_allocated = true;
+			u32 first_cluster = 0;
+			for (u32 cluster = 1; cluster < sc->sb->num_clusters; ++cluster) {
+				bool on_disk_flag = get_cluster_allocation_map_bit(sc, cluster);
+				bool calculated_flag = get_calculated_cluster_allocation_map_bit(sc, cluster);
+				bool new_range = false;
+				bool print = false;
+				
+				if (likely(on_disk_flag == calculated_flag)) {
+					if (unlikely(valid_problem_range)) {
+						print = true;
+					}
+				} else {
+					if (likely(!valid_problem_range) || unlikely(really_allocated != calculated_flag)) {
+						new_range = true;
+						if (likely(valid_problem_range)) {
+							print = true;
+						}
 					}
 				}
-			}
-			if (unlikely(print)) {
-				valid_problem_range=false;
-				eprintf(" %c",really_allocated?'+':'-');
-				if (unlikely(first_cluster==cluster-1)) {
-					eprintf("%lu",(unsigned long)first_cluster);
-				} else {
-					eprintf("(%lu..%lu)",(unsigned long)first_cluster,(unsigned long)cluster-1);
+				if (unlikely(print)) {
+					valid_problem_range = false;
+					eprintf(" %c", really_allocated ? '+' : '-');
+					if (unlikely(first_cluster == cluster-1)) {
+						eprintf("%lu", (unsigned long)first_cluster);
+					} else {
+						eprintf("(%lu..%lu)", (unsigned long)first_cluster, (unsigned long)cluster - 1);
+					}
 				}
-			}
-			if (new_range) {
-				valid_problem_range=true;
-				really_allocated=calculated_flag;
-				first_cluster=cluster;
+				if (new_range) {
+					valid_problem_range = true;
+					really_allocated = calculated_flag;
+					first_cluster = cluster;
+				}
 			}
 		}
 		eprintf("\n");
