@@ -59,6 +59,7 @@ static block_t lv_read(struct bdev * bdev, block_t first, block_t num, unsigned 
 static block_t lv_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 static bool lv_destroy(struct bdev * bdev);
 static block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map);
+static block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map);
 
 static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
@@ -1167,9 +1168,10 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 			}
 			return (struct bdev *)0xdeadbeef;
 		}
-		bdev_set_read_function(dev,lv_read);
-		bdev_set_write_function(dev,lv_write);
-		bdev_set_short_read_function(dev,lv_short_read);
+		bdev_set_read_function(dev, lv_read);
+		bdev_set_write_function(dev, lv_write);
+		bdev_set_short_read_function(dev, lv_short_read);
+		bdev_set_disaster_read_function(dev, lv_disaster_read);
 	}
 	free(lvs);
 	/*
@@ -1185,7 +1187,6 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 	
 	// Return a non-NULL pointer to make a check like "if (!init(...)) 
 	// exit(2);" fail, but don't give 'em a valid pointer.
-	
 	return (struct bdev *)0xdeadbeef;
 
 err:
@@ -1230,10 +1231,14 @@ bool lv_destroy(struct bdev * bdev) {
 }
 
 block_t lv_read(struct bdev * bdev, block_t first, block_t num, u8 * data) {
-	return lv_short_read(bdev, first, num, data, NULL);
+	return lv_disaster_read(bdev, first, num, data, NULL, NULL);
 }
 
 block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map) {
+	return lv_disaster_read(bdev, first, num, data, error_map, NULL);
+}
+
+block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map) {
 	BDEV_PRIVATE(struct lv_bdev); struct lv_bdev * lv_bdev = private;
 	
 //	struct bdev * * vg_bdev=lv_bdev->vg->bdev;
@@ -1254,7 +1259,16 @@ block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data,
 			struct pv * pv=lv_bdev->vg->pv+(lv->segment[s].pv_num);
 			struct pv_in_core * cpv=&VAACCESS(conf->pv,lv->segment[s].pv_num);
 			block_t r;
-			if (error_map) {
+			if (error_map && ignore_map) {
+				r=bdev_disaster_read(
+					lv_bdev->vg->bdev[pv->num],
+					cpv->first_pe_start_block+pso+ro,
+					sn,
+					data,
+					error_map,
+					ignore_map
+				);
+			} else if (error_map) {
 				r=bdev_short_read(
 					lv_bdev->vg->bdev[pv->num],
 					cpv->first_pe_start_block+pso+ro,
