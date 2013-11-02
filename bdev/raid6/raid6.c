@@ -25,6 +25,7 @@
  * Public interface
  */
 bool raid6_verify_parity=true;
+bool raid6_notify_read_error = false;
 
 /*
  * Indirect public interface (via struct dev)
@@ -1436,6 +1437,7 @@ static bool raid6_read_stripe(
 	unsigned failmap[private->parity_disks];
 	off_t block_size=bdev_get_block_size(private->disk[0].bdev);
 	for (unsigned i=0;i<private->data_disks;++i) {
+		unsigned d = i;
 		dataptrs[i]=d_buffer+i*block_size; // stripe_size_Bytes
 		if (private->disk[mapping[i]].layoutmapping!=-1) {
 			struct bdev * component=private->disk[private->disk[mapping[i]].layoutmapping].bdev;
@@ -1446,11 +1448,12 @@ static bool raid6_read_stripe(
 				1,
 				dataptrs[i]
 			)) {
-				if (0) NOTIFYF("%s: Couldn't read D%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
+				if (raid6_notify_read_error)
+				NOTIFYF("%s: Couldn't read D%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
 					,bdev_get_name(private->this)
 					,i
 					,bdev_get_name(component)
-					,mapping[i]
+					,mapping[d]
 					,i
 					,(unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
 					,(unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
@@ -1485,7 +1488,8 @@ data_failed:
 				1,
 				dataptrs[d]
 			)) {
-				if (0) NOTIFYF("%s: Couldn't read P%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
+				if (raid6_notify_read_error)
+				NOTIFYF("%s: Couldn't read P%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
 					,bdev_get_name(private->this)
 					,i
 					,bdev_get_name(component)
