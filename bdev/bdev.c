@@ -144,6 +144,20 @@ struct bdev * bdev_lookup_bdev(const char * bdev_name) {
 	return NULL;
 }
 
+bool bdev_rename_bdev(
+	struct bdev * bdev,
+	char * new_name
+) {
+	if (bdev_lookup_bdev(new_name)) {
+		free(new_name);
+		errno = EEXIST;
+		return false;
+	}
+	free(bdev->name);
+	bdev->name = new_name;
+	return true;
+}
+
 const char * bdev_get_name(const struct bdev * bdev) {
 	return bdev->name;
 }

@@ -52,6 +52,11 @@ struct bdev * bdev_register_bdev(
 	void * private
 );
 
+bool bdev_rename_bdev(
+	struct bdev * bdev,
+	char * new_name
+);
+
 struct bdev * bdev_lookup_bdev(const char * bdev_name);
 
 const char * bdev_get_name(const struct bdev * bdev);
