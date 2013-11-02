@@ -17,6 +17,7 @@
 
 #include <assert.h>
 #include <btlock.h>
+#include <btstr.h>
 #include <btthread.h>
 #include <ctype.h>
 #include <errno.h>
@@ -856,104 +857,124 @@ bool read_table_for_one_group(struct scan_context * sc) {
 		bool have_zero_errors=false;
 		bool have_soft_errors=false;
 		bool have_hard_errors=false;
-		unsigned bs=bdev_get_block_size(sc->bdev);
+		unsigned bs=sc->block_size;
 		u8 error_bitmap[bs];
-		bool first=true;
+		u8 ignore_map[bs];
+		char * msg = NULL;
+		{
+			memset(ignore_map, 0, bs);
+			struct inode * it=(struct inode *)ignore_map;
+			int ni=bs/sizeof(struct inode);
+			for (int i=0;i<ni;++i) {
+				#define FIELD_TEST_MASK(fieldname, fieldmask, fieldflag) do { it[i].fieldname = fieldmask; } while (0)
+				#define FIELD_TEST(fieldname, fieldflag) do { it[i].fieldname = -1; } while (0)
+				
+				FIELD_TEST_MASK(mode, 07777, 'M');
+				FIELD_TEST(uid, 'u');
+				FIELD_TEST(atime, 'a');
+				FIELD_TEST(ctime, 'c');
+				FIELD_TEST(mtime, 'm');
+				FIELD_TEST(dtime, 'd');
+				FIELD_TEST(gid, 'g');
+				FIELD_TEST(links_count, 'l');
+				FIELD_TEST(num_blocks, 'b');
+				FIELD_TEST(flags, 'f');
+				FIELD_TEST(translator, 't');
+				FIELD_TEST(generation, 'e');
+				FIELD_TEST(mode_high, 'H');
+				FIELD_TEST(uid_high, 'U');
+				FIELD_TEST(gid_high, 'G');
+				FIELD_TEST(author, 'A');
+				FIELD_TEST(file_acl, 'L'); // If file system doesn't use ACLs
+				FIELD_TEST(faddr, 'D'); // If file system doesn't use fragments
+				FIELD_TEST(frag, 'R');
+				FIELD_TEST(fsize, 'z');
+				
+				#undef FIELD_TEST_MASK
+				#undef FIELD_TEST
+			}
+		}
 		for (block_t i=0;i<it_s;++i) {
-			block_t r=bdev_read(sc->bdev,it_a,1,it_b);
-//			eprintf("%s->read(%llu,1,%p)=%lli\n",bdev_get_name(sc->bdev),(unsigned long long)it_a,it_b,(int long long)r);
+			block_t r = bdev_disaster_read(sc->bdev, it_a, 1, it_b, error_bitmap, ignore_map);
+//			eprintf("%s->short_read(%llu,1,%p,%p)=%lli\n",bdev_get_name(sc->bdev),(unsigned long long)it_a,it_b,error_bitmap,(int long long)r);
 			if (1!=r) {
-				have_zero_errors=true;
-				r=bdev_short_read(sc->bdev,it_a,1,it_b,error_bitmap);
-//				eprintf("%s->short_read(%llu,1,%p,%p)=%lli\n",bdev_get_name(sc->bdev),(unsigned long long)it_a,it_b,error_bitmap,(int long long)r);
-				if (1!=r) {
-					have_hard_errors=true;
-					have_soft_errors=true;
-					memset(it_b,0,bs);
-				} else {
-//					struct inode * it=(struct inode *)error_bitmap;
-					int ni=bs/sizeof(struct inode);
-					if (first) {
-						first=false;
-						// eprintf("Errors in fields: ");
-					}
-					for (int i=0;i<ni;++i) {
-						/*
-						eprintf("[it[i].links_count=%u]",it[i].links_count);
-						if (it[i].mode&07777) eprintf("M");
-						if (it[i].uid) eprintf("u");
-						if (it[i].atime) eprintf("a");
-						if (it[i].ctime) eprintf("c");
-						if (it[i].mtime) eprintf("m");
-						if (it[i].dtime) eprintf("d");
-						if (it[i].gid) eprintf("g");
-						if (it[i].links_count) eprintf("l");
-						if (it[i].num_blocks) eprintf("b");
-						if (it[i].flags) eprintf("f");
-						if (it[i].translator) eprintf("t");
-						if (it[i].generation) eprintf("e");
-						if (it[i].mode_high) eprintf("H");
-						if (it[i].uid_high) eprintf("U");
-						if (it[i].gid_high) eprintf("G");
-						if (it[i].author) eprintf("A");
-						if (it[i].file_acl) eprintf("L");
-						if (it[i].faddr) eprintf("D");
-						if (it[i].frag) eprintf("R");
-						if (it[i].fsize) eprintf("z");
-						*/
-						
-						// it[i].mode&=~07777;
-						// it[i].uid=0;
-						// it[i].atime=0;
-						// it[i].ctime=0;
-						// it[i].mtime=0;
-						// it[i].dtime=0;
-						// it[i].gid=0;
-						// it[i].links_count=0;
-						// it[i].num_blocks=0;
-						// it[i].flags=0;
-						// it[i].translator=0;
-						// it[i].generation=0;
-						// it[i].mode_high=0;
-						// it[i].uid_high=0;
-						// it[i].gid_high=0;
-						// it[i].author=0;
-						// *** If file system doesn't use ACLs:
-						// it[i].file_acl=0;
-						// *** If file system doesn't use fragments:
-						// it[i].faddr=0;
-						// it[i].frag=0;
-						// it[i].fsize=0;
-					}
-					for (unsigned i=0;i<bs;++i) {
-						if (error_bitmap[i]) {
-							have_soft_errors=true;
-							memset(it_b,0,bs);
-							break;
-						}
+				have_hard_errors = true;
+				memset(it_b,0,bs);
+			} else {
+				struct inode * it=(struct inode *)error_bitmap;
+				int ni=bs/sizeof(struct inode);
+				for (int i=0;i<ni;++i) {
+					#define FIELD_TEST_MASK(fieldname, fieldmask, fieldflag) do { \
+						if (it[i].fieldname & fieldmask) { \
+							if (!msg) { msg = mstrcpy("Errors in fields: "); } \
+							char * tmp = msg; msg = mprintf("%s%c", tmp, fieldflag); free(tmp); \
+							it[i].fieldname &= ~fieldmask; \
+						} \
+					} while (0)
+					#define FIELD_TEST(fieldname, fieldflag) do { \
+						if (it[i].fieldname) { \
+							if (!msg) { msg = mstrcpy("Errors in fields: "); } \
+							char * tmp = msg; msg = mprintf("%s%c", tmp, fieldflag); free(tmp); \
+							it[i].fieldname = 0; \
+						} \
+					} while (0)
+					
+					FIELD_TEST_MASK(mode, 07777, 'M');
+					FIELD_TEST(uid, 'u');
+					FIELD_TEST(atime, 'a');
+					FIELD_TEST(ctime, 'c');
+					FIELD_TEST(mtime, 'm');
+					FIELD_TEST(dtime, 'd');
+					FIELD_TEST(gid, 'g');
+					FIELD_TEST(links_count, 'l');
+					FIELD_TEST(num_blocks, 'b');
+					FIELD_TEST(flags, 'f');
+					FIELD_TEST(translator, 't');
+					FIELD_TEST(generation, 'e');
+					FIELD_TEST(mode_high, 'H');
+					FIELD_TEST(uid_high, 'U');
+					FIELD_TEST(gid_high, 'G');
+					FIELD_TEST(author, 'A');
+					FIELD_TEST(file_acl, 'L'); // If file system doesn't use ACLs
+					FIELD_TEST(faddr, 'D'); // If file system doesn't use fragments
+					FIELD_TEST(frag, 'R');
+					FIELD_TEST(fsize, 'z');
+				}
+				for (unsigned i=0;i<bs;++i) {
+					if (error_bitmap[i]) {
+						have_soft_errors = true;
+						break;
 					}
 				}
 			}
 			it_a++;
 			it_b+=bs;
 		}
-		if (!first) {
-//			eprintf("\n");
+		if (msg) {
+//			eprintf("%s\n", msg);
+			free(msg);
+			have_zero_errors = true;
 		}
 		if (have_zero_errors) {
-			if (have_soft_errors) {
-				if (have_hard_errors) {
-					eprintf("\033[31m");
-					ERRORF("%s: While reading inode table for group %u: Couldn't read all blocks of inode table :(",sc->name,sc->table_reader_group);
-					eprintf("\033[0m");
-				} else {
-					eprintf("\033[31m");
-					ERRORF("%s: While reading inode table for group %u: Couldn't read all blocks savely :(",sc->name,sc->table_reader_group);
-					eprintf("\033[0m");
-				}
-			} else {
-				NOTIFYF("%s: While reading inode table for group %u: Unproblematic read errors.",sc->name,sc->table_reader_group);
-			}
+			NOTIFYF(
+				"%s: While reading inode table for group %u: Received unproblematic notifications on wrong data."
+				, sc->name
+				, sc->table_reader_group
+			);
+		}
+		if (have_soft_errors) {
+			ERRORF(
+				"\033[31m%s: While reading inode table for group %u: Received problematic notifications on wrong data. :(\033[0m"
+				, sc->name
+				, sc->table_reader_group
+			);
+		}
+		if (have_hard_errors) {
+			ERRORF(
+				"\033[31m%s: While reading inode table for group %u: Couldn't read all blocks of inode table :(\033[0m"
+				, sc->name
+				, sc->table_reader_group
+			);
 		}
 	}
 	
@@ -1449,15 +1470,27 @@ THREAD_RETURN_TYPE ext2_read_tables(void * arg) {
 }
 
 void process_dir_cluster(struct inode_scan_context * isc,unsigned long cluster) {
-	u8 buffer[isc->sc->cluster_size_Bytes];
-	void * ptr=(void *)buffer;
+	u8 buffer[isc->sc->cluster_size_Bytes]; void * ptr_buffer = (void *)buffer;
+	u8 errmap[isc->sc->cluster_size_Bytes]; void * ptr_errmap = (void *)errmap;
 	
-	if (isc->sc->cluster_size_Blocks!=bdev_read(
-		isc->sc->bdev,cluster*isc->sc->cluster_size_Blocks,isc->sc->cluster_size_Blocks,ptr)
-	) {
-		ERRORF("%s: Inode %lu [%s]: Error while reading directory cluster %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
+	block_t r = bdev_short_read(isc->sc->bdev, cluster * isc->sc->cluster_size_Blocks, isc->sc->cluster_size_Blocks, ptr_buffer, ptr_errmap);
+	if (isc->sc->cluster_size_Blocks != r) {
+		ERRORF("%s: Inode %lu [%s]: Error while reading directory cluster %lu", isc->sc->name, isc->inode_num, isc->type, cluster);
 		++isc->read_error_ind_clusters[0];
-		return;
+		if (!r) {
+			return;
+		} else {
+			memset(buffer + r * isc->sc->block_size, 0, (isc->sc->cluster_size_Blocks - r) * isc->sc->block_size);
+			memset(errmap + r * isc->sc->block_size, 0, (isc->sc->cluster_size_Blocks - r) * isc->sc->block_size);
+		}
+	}
+	
+	unsigned i;
+	for (i = 0; i < isc->sc->cluster_size_Bytes; ++i) {
+		if (errmap[i]) break;
+	}
+	if (i != isc->sc->cluster_size_Bytes) {
+		ERRORF("%s: Inode %lu [%s]: While reading directory cluster %lu: Received wrong data notification.", isc->sc->name, isc->inode_num, isc->type, cluster);
 	}
 	
 	/*
@@ -1621,14 +1654,58 @@ void chk_block(struct inode_scan_context * isc,int level,unsigned long cluster) 
 	
 	if (likely(!level)) return;
 	
-	u32 pointer[isc->sc->num_clusterpointers];
-	void * ptr=(void *)pointer;
+	u32 error_bitmap[isc->sc->num_clusterpointers];
+	void * ptr_error_bitmap = (void *)error_bitmap;
 	
-	if (isc->sc->cluster_size_Blocks!=bdev_read(isc->sc->bdev,cluster*isc->sc->cluster_size_Blocks,isc->sc->cluster_size_Blocks,ptr)) {
-		ERRORF("%s: Inode %lu [%s]: Error while reading indirect cluster %lu",isc->sc->name,isc->inode_num,isc->type,cluster);
+	const char * what_ind[4] = {
+		"ERROR!",
+		"single",
+		"double",
+		"trible",
+	};
+	
+	if (isc->sc->cluster_size_Blocks != bdev_short_read(
+		isc->sc->bdev, cluster * isc->sc->cluster_size_Blocks, isc->sc->cluster_size_Blocks, ptr_pointer, ptr_error_bitmap
+	)) {
+		ERRORF(
+			"%s: Inode %lu [%s]: Error while reading %s indirect cluster %lu"
+			, isc->sc->name
+			, isc->inode_num
+			, isc->type
+			, what_ind[level]
+			, cluster
+		);
 		++isc->read_error_ind_clusters[level];
 	} else {
-		for (unsigned i=0;i<isc->sc->num_clusterpointers;++i) {
+		for (unsigned i = 0; i < isc->sc->num_clusterpointers; ++i) {
+			u32 pointer_steps;
+			switch (level) {
+				case 1 /* sind */: pointer_steps =                                          1                                 ; break;
+				case 2 /* dind */: pointer_steps =      (1 + isc->sc->num_clusterpointers * 1)                                ; break;
+				case 3 /* tind */: pointer_steps = (1 + (1 + isc->sc->num_clusterpointers * 1) * isc->sc->num_clusterpointers); break;
+				default: assert_never_reached();
+			}
+			u32 expected_pointer1 = cluster + 1 + i * pointer_steps;
+			u32 expected_pointer2 = i ? pointer[i - 1] + pointer_steps : expected_pointer1;
+			u32 expected_pointer3 = i < (isc->sc->num_clusterpointers - 1) ? pointer[i + 1] - pointer_steps : expected_pointer1;
+			if (true
+			&&  error_bitmap[i]
+			&&  pointer[i]
+			&&  pointer[i] != expected_pointer1
+			&&  pointer[i] != expected_pointer2
+			&&  pointer[i] != expected_pointer3
+			&&  true) {
+				NOTIFYF(
+					"%s: Inode %lu [%s]: Wrong data notification received while reading %s indirect cluster %lu. Possibly wrong cluster pointer: %lu."
+					, isc->sc->name
+					, isc->inode_num
+					, isc->type
+					, what_ind[level]
+					, (unsigned long)cluster
+					, (unsigned long)pointer[i]
+				);
+			}
+			
 			chk_block(isc,level-1,pointer[i]);
 		}
 	}
@@ -1901,10 +1978,26 @@ skip_dir:
 		ERRORF(
 			"%s: Inode %lu [%s] contains %lu illegal clusters "
 			"(%lu zind, %lu sind, %lu dind, %lu tind)."
-			,isc->sc->name,isc->inode_num,isc->type
-			,illegal_clusters
-			,isc->illegal_ind_clusters[0],isc->illegal_ind_clusters[1]
-			,isc->illegal_ind_clusters[2],isc->illegal_ind_clusters[3]
+			, isc->sc->name,isc->inode_num,isc->type
+			, illegal_clusters
+			, isc->illegal_ind_clusters[0],isc->illegal_ind_clusters[1]
+			, isc->illegal_ind_clusters[2],isc->illegal_ind_clusters[3]
+		);
+//		isc->ok=false;
+	}
+	
+	if (read_error_clusters) {
+		ERRORF(
+			"%s: Inode %lu [%s]: Couldn't read %lu clusters "
+			"(%lu zind, %lu sind, %lu dind, %lu tind)."
+			, isc->sc->name
+			, isc->inode_num
+			, isc->type
+			, read_error_clusters
+			, isc->read_error_ind_clusters[0]
+			, isc->read_error_ind_clusters[1]
+			, isc->read_error_ind_clusters[2]
+			, isc->read_error_ind_clusters[3]
 		);
 //		isc->ok=false;
 	}
@@ -1963,7 +2056,10 @@ void cluster_scan_inode(struct inode_scan_context * isc) {
 		return;
 	}
 	
-	for (int i=0;i<4;++i) isc->illegal_ind_clusters[i]=0;
+	for (int i=0;i<4;++i) {
+		isc->illegal_ind_clusters[i] = 0;
+		isc->read_error_ind_clusters[i] = 0;
+	}
 	isc->used_clusters=0;
 	isc->maybe_holes=0;
 	isc->holes=0;
