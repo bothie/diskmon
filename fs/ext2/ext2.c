@@ -4336,6 +4336,7 @@ cleanup:
 		}
 		if (sc->com_cache_thread_lock) btlock_lock_free(sc->com_cache_thread_lock);
 		if (sc->table_reader_full) btlock_lock_free(sc->table_reader_full);
+		TRE_WAKE(); TRE_WAIT(); // Reset state to default
 		if (sc->table_reader_empty) btlock_lock_free(sc->table_reader_empty);
 		free(sc->inode_link_count);
 		free(sc->inode_type_str);
