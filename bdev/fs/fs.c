@@ -90,5 +90,7 @@ struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char 
 	
 	fsck(args);
 	
-	return NULL;
+	// Return a non-NULL pointer to make a check like "if (!init(...)) 
+	// exit(2);" fail, but don't give 'em a valid pointer.
+	return (struct bdev *)0xdeadbeef;
 }
