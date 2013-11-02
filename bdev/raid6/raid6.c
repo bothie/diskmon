@@ -24,7 +24,8 @@
 /*
  * Public interface
  */
-bool raid6_verify_parity=true;
+bool raid6_verify_parity = false;
+bool raid6_dump_blocks_on_parity_mismatch = true;
 bool raid6_notify_read_error = false;
 
 /*
@@ -41,6 +42,8 @@ static bool raid6_component_destroy(struct bdev * bdev);
 static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
 
 static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map);
+static block_t raid6_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map);
+static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map);
 static block_t raid6_data_write(struct bdev * bdev, block_t first, block_t num, const u8 * data);
 
 static bool initialized;
@@ -63,8 +66,6 @@ BDEV_FINI {
  * Implementation - everything non-public (except for init of course).
  */
 
-#define verify_parity raid6_verify_parity
-
 struct raid6_disk {
 	/*
 	 * In raid6_init we get the disks in a random order. The first disk 
@@ -86,6 +87,7 @@ struct raid6_disk {
 		struct softraid_superblock_1 * v1;
 	} sb;
 	bool silently_fix_next;
+	u64 events;
 };
 
 struct raid6_dev {
@@ -101,6 +103,14 @@ struct raid6_dev {
 	bool can_recover;
 	unsigned refcount;
 	block_t size;
+	u64 max_events;
+	bool events_in_sync;
+	bool verify_parity;
+	bool may_verify_parity;
+	u8 * d_space;
+	u8 * p_space;
+	u8 * v_space;
+	u8 * t_space;
 };
 
 struct raid6_component_dev {
@@ -422,6 +432,9 @@ static struct bdev * raid6_init(struct bdev_driver * bdev_driver,char * name,con
 		ERROR("Couldn't allocate raid device descriptor.");
 		goto err;
 	}
+	
+	private->verify_parity = raid6_verify_parity;
+	private->may_verify_parity = private->verify_parity;
 	
 	const char * p;
 	unsigned long param_level;
@@ -839,6 +852,10 @@ print_err:
 				
 				private->size=private->disk[0].sb.v0->sb0_size*2;
 				
+				private->disk[d].events = private->disk[d].sb.v0->events;
+				private->max_events = private->disk[d].sb.v0->events;
+				private->events_in_sync = true;
+				
 				NOTIFYF("gvalid_words=%lu",(unsigned long)private->disk[d].sb.v0->gvalid_words);
 			} // if (param_valid), else
 			
@@ -907,6 +924,13 @@ print_err:
 					);
 					print_superblock_v0(private->disk[0].sb.v0);
 					print_superblock_v0(private->disk[d].sb.v0);
+					if (private->max_events != private->disk[d].sb.v0->events) {
+						private->events_in_sync = false;
+						private->may_verify_parity = true;
+						if (private->max_events < private->disk[d].sb.v0->events) {
+							private->max_events = private->disk[d].sb.v0->events;
+						}
+					}
 					if (!private->can_recover) {
 						/*
 						 * If we're not able to recover because of too many failed disk, we don't kick any disk and 
@@ -946,6 +970,8 @@ print_err:
 					free(private->disk[d].sb.v0); private->disk[d].sb.v0=NULL;
 					goto restart;
 				}
+				
+				private->disk[d].events = private->disk[d].sb.v0->events;
 			} // if (!param_valid)
 		} // if (!d), else
 		
@@ -1099,6 +1125,12 @@ print_err:
 			goto err_malloc;
 		}
 	}
+	
+	private->d_space = malloc(block_size * private->data_disks);
+	private->p_space = malloc(block_size * 2);
+	private->v_space = private->may_verify_parity ? malloc(block_size * 2) : NULL;
+	private->t_space = private->may_verify_parity ? malloc(block_size * 2) : NULL;
+	
 	if (!(retval=bdev_register_bdev(
 		bdev_driver,
 		name,
@@ -1114,7 +1146,8 @@ print_err:
 //	bdev_set_write_function(retval,raid6_write);
 //	bdev_set_read_function(retval,raid6_data_read);
 //	bdev_set_write_function(retval,raid6_data_write);
-//	bdev_set_short_read_function(retval,raid6_short_read);
+	bdev_set_short_read_function(retval, raid6_short_read);
+	bdev_set_disaster_read_function(retval, raid6_disaster_read);
 	private->refcount=1;
 	for (unsigned i=0;i<private->num_disks;++i) {
 		char * tmp;
@@ -1412,16 +1445,76 @@ static void raid6_get_role_mapping_for_chunk(
 	if (role2column_mapping) memcpy(role2column_mapping,r2c_mapping,sizeof(r2c_mapping));
 }
 
+/*
+ * raid6_read_stripe
+ *
+ * Read one stripe of data. A stripe of data in this context is defined as one block per disk of all disks.
+ * Addressing is done using chunks and stripes. A chunk is a number of consequitve stripes where the
+ * organisation of mapping of data disks D0..Dn and parity disks P0..Pn to real disks is equal. (i.e. a
+ * raid4 consists of exactly one chunk). Stripes are then used to address data within such a chunk.
+ * 
+ * struct raid6_dev * private - the devise from which to read
+ * block_t chunk - the chunk to read from
+ * block_t stripe - the strip within the chunk to read
+ * unsigned char * * d_buffer - pointer where data of data   disks shall be written to.
+ * unsigned char * * p_buffer - pointer where data of parity disks shall be written to.
+ * unsigned char * * v_buffer - pointer where data of calculated parities (i.e. verify) shall be written to.
+ * unsigned char * * t_buffer - pointer where test data shall be written to.
+ * unsigned char * * e_buffer - pointer to error map. If NULL, any parity mismatch will result in an IO error.
+ * unsigned char * * i_buffer - pointer to ignore map. Any parity mismatch where a bit of i_buffer is set, will be ignored.
+ * 
+ * d_buffer and p_buffer must be non-NULL with private->data_disks entries in d_buffer and 2 (sic!) entries in p_buffer
+ * pointing to block size bytes of DISTINCT(!) buffer space each.
+ * If private->verify_parity is set, v_buffer must be non-NULL with 2 entries pointing to block size bytes of DISTINCT(!) buffer
+ * space. In raid6, then t_buffer must also be non-NULL with 2 entries pointing to block size bytes of DISTINCT(!) buffer
+ * space for the artificial kick feature to repair single parity mismatches.
+ * When e_buffer is non-NULL, it must contain private->data_disks entries pointing to block size bytes of DISTINCT(!) buffer
+ * space. Any parity mismatch, which couldn't be fixed by artificial kicking a single disk will be recorded here. In this
+ * case, the function will successfully return on parity mismatch. Of e_buffer is NULL, any parity mismatch which couldn't
+ * be fixed will result in a failure (to be interpreted as IO error).
+ * When i_buffer is non-NULL, it must contain private->data_disks entries pointing to block size bytes of DISTINCT(!) buffer
+ * space. As an exception, e_buffer[i] may equal to i_buffer[i]. When i_buffer is set, any unfixable parity mismatch will be
+ * ignored, if the corresponding bit in i_buffer[i][byte] is set. Since parity mismatches won't report an error, if e_buffer
+ * is set, this only affects error reporting using the logging facility (especially whether such error blocks get dumped or
+ * not.
+ */
 static bool raid6_read_stripe(
 	struct raid6_dev * private,
 	block_t chunk,
 	block_t stripe,
-	unsigned char * d_buffer,
-	unsigned char * p_buffer,
-	unsigned char * v_buffer,
-	unsigned char * t_buffer
+	unsigned char * const * d_buffer_ptr,
+	unsigned char * const * e_buffer,
+	const unsigned char * const * i_buffer
 ) {
 	if (debug_striped_reader) eprintf("\t\t\traid6_read_stripe(chunk=%llu,stripe=%llu)\n",(unsigned long long)chunk,(unsigned long long)stripe);
+	
+	off_t block_size=bdev_get_block_size(private->disk[0].bdev);
+	
+	unsigned char * p_buffer[2];
+	unsigned char * v_buffer[2];
+	unsigned char * t_buffer[2];
+	
+	for (unsigned i = 0; i < 2; ++i) {
+		// Parity may be needed for recovery, so set it unconditionally
+		p_buffer[i] = private->p_space + i * block_size;
+		if (private->may_verify_parity) {
+			v_buffer[i] = private->v_space + i * block_size;
+			t_buffer[i] = private->t_space + i * block_size;
+		} else {
+			v_buffer[i] = NULL;
+			t_buffer[i] = NULL;
+		}
+	}
+	
+	unsigned char * d_buffer[private->data_disks];
+	bool need_data[private->data_disks];
+	for (unsigned i = 0; i < private->data_disks; ++i) {
+		if ((need_data[i] = !!d_buffer_ptr[i])) {
+			d_buffer[i] = d_buffer_ptr[i];
+		} else {
+			d_buffer[i] = private->d_space + i * block_size;
+		}
+	}
 	
 	unsigned mapping[private->num_disks];
 	
@@ -1435,12 +1528,11 @@ static bool raid6_read_stripe(
 	 * failed disks make data nonrecoverably anyways ...
 	 */
 	unsigned failmap[private->parity_disks];
-	off_t block_size=bdev_get_block_size(private->disk[0].bdev);
 	for (unsigned i=0;i<private->data_disks;++i) {
 		unsigned d = i;
-		dataptrs[i]=d_buffer+i*block_size; // stripe_size_Bytes
-		if (private->disk[mapping[i]].layoutmapping!=-1) {
-			struct bdev * component=private->disk[private->disk[mapping[i]].layoutmapping].bdev;
+		dataptrs[i] = d_buffer[i];
+		if (private->disk[mapping[d]].layoutmapping!=-1) {
+			struct bdev * component=private->disk[private->disk[mapping[d]].layoutmapping].bdev;
 			
 			if (1!=bdev_read(
 				component,
@@ -1478,7 +1570,7 @@ data_failed:
 	}
 	for (unsigned i=0;i<private->parity_disks;++i) {
 		unsigned d=private->data_disks+i;
-		dataptrs[d]=p_buffer+i*block_size; // stripe_size_Bytes
+		dataptrs[d] = p_buffer[i];
 		// debug_trash=mapping[d];
 		if (private->disk[mapping[d]].layoutmapping!=-1) {
 			struct bdev * component=private->disk[private->disk[mapping[d]].layoutmapping].bdev;
@@ -1543,31 +1635,63 @@ retry_main_recovery:
 			return false;
 		} */
 	}
-	if (verify_parity && num_failed!=private->parity_disks) {
+	bool do_verify_parity = false;
+	if (private->verify_parity) {
+		do_verify_parity = true;
+	} else if (!private->events_in_sync) {
+		bool need_recovery = false;
+		for (unsigned i = 0; i < private->data_disks; ++i) {
+			if (!need_data[i]) {
+				continue;
+			}
+			int d = private->disk[mapping[i]].layoutmapping;
+			if (d == -1) {
+				need_recovery = true;
+				continue;
+			}
+			if (private->disk[mapping[d]].events != private->max_events) {
+				do_verify_parity = true;
+				break;
+			}
+		}
+		if (!do_verify_parity && need_recovery) {
+			// FIXME: In RAID6, if exactly ONE disk has events != max_events and exactly another one has failed, we might just assume the one events != max_events being kicked and skip verify_parity
+			do_verify_parity = !private->events_in_sync;
+			/*
+			for (unsigned i = 0; i < private->num_disks; ++i) {
+				int d = private->disk[mapping[i]].layoutmapping;
+				if (d == -1) {
+					continue;
+				}
+				if (private->disk[mapping[d]].events != private->max_events) {
+					do_verify_parity = true;
+					break;
+				}
+			}
+			*/
+		}
+	}
+	if (do_verify_parity && num_failed != private->parity_disks) {
 /*
 		if (num_failed) {
 			NOTIFY("Now rechecking parity bits.");
 		}
 */
-		unsigned i,j,k,l;
-		u8 * testing_dataptrs[private->num_disks];
-		for (i=0;i<private->num_disks;++i) {
-			testing_dataptrs[i]=dataptrs[i];
+		u8 * testing_dataptrs[nd];
+		for (unsigned i = 0; i < private->data_disks; ++i) {
+			testing_dataptrs[i] = dataptrs[i];
 		}
-		for (unsigned i=0;i<private->parity_disks;++i) {
-			testing_dataptrs[private->data_disks+i]=v_buffer+i*block_size;
+		for (unsigned i=0;i<2;++i) {
+			testing_dataptrs[private->data_disks + i] = v_buffer[i];
 		}
-		ALGO.gen_syndrome(private->num_disks,block_size,testing_dataptrs);
+		ALGO.gen_syndrome(nd, block_size, testing_dataptrs);
 		unsigned parity_mismatch=0;
 		for (unsigned i=0;i<private->parity_disks;++i) {
-			parity_mismatch+=!!memcmp(
-				p_buffer+i*block_size,
-				v_buffer+i*block_size,
-				block_size
-			);
+			parity_mismatch += !!memcmp(p_buffer[i], v_buffer[i], block_size);
 		}
 		if (!parity_mismatch) {
 			if (num_failed) {
+				assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
 /*
 				NOTIFY("No parity mismatch found (so, the reconstructed data is valid).");
 */
@@ -1636,13 +1760,13 @@ retry_main_recovery:
 			 */
 			unsigned num_avail=private->num_disks-num_failed;
 			unsigned avail[num_avail];
-			for (i=k=0;i<num_avail;++i) {
-				for (j=0;j<num_failed;++j) {
-					if (k==failmap[j]) {
-						if (++k==failmap[j=0]) ++k;
+			for (unsigned i = 0, k = 0; i < num_avail; ++i) {
+				for (unsigned j = 0; j < num_failed; ++j) {
+					if (k == failmap[j]) {
+						if (++k == failmap[j = 0]) ++k;
 					}
 				}
-				avail[i]=k++;
+				avail[i] = k++;
 			}
 //			eprintf("avai[]={");
 //			for (i=0;i<num_avail;++i) {
@@ -1658,11 +1782,12 @@ retry_main_recovery:
 			unsigned char first_solution_data[private->parity_disks*block_size];
 //			eprintf("%s:%s:%i: silently := false\n",__FILE__,__FUNCTION__,__LINE__);
 			while (!first_solution_tmp && ++art_num_failed<(private->parity_disks-num_failed)) {
+				assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
 //				eprintf("art_num_failed=%u\n",art_num_failed);
 				bool valid_permutation=true;
 				art_failmap[0]=0;
-				i=1;
-				l=0;
+				unsigned i = 1;
+				unsigned l = 0;
 				while (valid_permutation) {
 //					eprintf("while (valid_permutation)\n");
 regen_permutation:
@@ -1683,25 +1808,25 @@ regen_permutation:
 					
 					u8 * parity_ptr[private->parity_disks];
 					for (i=0;i<private->parity_disks;++i) {
-						testing_dataptrs[private->data_disks+i]
-						=parity_ptr[i]
-						=p_buffer+i*block_size;
+						testing_dataptrs[private->data_disks + i]
+						= parity_ptr[i]
+						= p_buffer[i];
 					}
 					
 					for (i=0;i<art_num_failed;++i) {
 						unsigned d=failmap[num_failed+i]=avail[art_failmap[i]];
-						testing_dataptrs[d]=t_buffer+i*block_size;
+						testing_dataptrs[d] = t_buffer[i];
 						if (d>=private->data_disks) {
 							parity_ptr[d-private->data_disks]
-							=t_buffer+i*block_size;
+							= t_buffer[i];
 						}
 					}
 					
 					ALGO.recover(nd,num_failed+art_num_failed,failmap,block_size,testing_dataptrs);
-					for (i=0;i<private->parity_disks;++i) {
-						testing_dataptrs[private->data_disks+i]=v_buffer+i*block_size;
+					for (i=0;i<2;++i) {
+						testing_dataptrs[private->data_disks + i] = v_buffer[i];
 					}
-					ALGO.gen_syndrome(private->num_disks,block_size,testing_dataptrs);
+					ALGO.gen_syndrome(nd, block_size, testing_dataptrs);
 					
 					for (i=0;i<art_num_failed;++i) {
 						testing_dataptrs[failmap[num_failed+i]]=dataptrs[failmap[num_failed+i]];
@@ -1709,11 +1834,7 @@ regen_permutation:
 					
 					parity_mismatch=0;
 					for (i=0;i<private->parity_disks;++i) {
-						parity_mismatch+=!!memcmp(
-							parity_ptr[i],
-							v_buffer+i*block_size,
-							block_size
-						);
+						parity_mismatch += !!memcmp(parity_ptr[i], v_buffer[i], block_size);
 					}
 					
 					if (!parity_mismatch) {
@@ -1763,6 +1884,7 @@ regen_permutation:
 				}
 			}
 			if (first_solution_tmp) {
+				assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
 //				eprintf("%s:%s:%i: silently == %s\n",__FILE__,__FUNCTION__,__LINE__,silently?"true":"false");
 				if (!silently) {
 //				if (art_num_failed!=1 
@@ -1843,7 +1965,7 @@ regen_permutation:
 					DEBUGF("failmap[%u]=%u",i,failmap[i]);
 				}
 */
-				for (i=0;i<art_num_failed;++i) {
+				for (unsigned i=0;i<art_num_failed;++i) {
 /*
 					DEBUGF("mapping[avail[first_solution_failmap[%u]=%u]=%u]=%u"
 						,                                     i
@@ -1855,7 +1977,46 @@ regen_permutation:
 					failmap[num_failed++]=avail[first_solution_failmap[i]];
 				}
 				goto retry_main_recovery;
-			} else {
+			} // if (first_solution_tmp)
+			
+			/*
+			 * recalculate verify buffer
+			 *
+			 * Right now, I'm not perfectly sure whether this is needed or not.
+			 * So, better be save than sorry and regen stuff.
+			 * 
+			 * TODO: Check this and maybe remove this block again.
+			 */
+			{
+				u8 * testing_dataptrs[nd];
+				for (unsigned i = 0; i < private->data_disks; ++i) {
+					testing_dataptrs[i] = dataptrs[i];
+				}
+				for (unsigned i = 0; i < 2; ++i) {
+					testing_dataptrs[private->data_disks + i] = v_buffer[i];
+				}
+				ALGO.gen_syndrome(nd, block_size, testing_dataptrs);
+			}
+			
+			bool report_mismatch = !i_buffer;
+			
+			if (i_buffer) {
+				for (unsigned b = 0; b < block_size; ++b) {
+					u8 diff_mask = 0;
+					for (unsigned p = 0; p < private->parity_disks; ++p) {
+						diff_mask |= p_buffer[p][b] ^ v_buffer[p][b];
+					}
+					for (unsigned d = 0; d < private->data_disks; ++d) {
+						if (i_buffer[d] && (i_buffer[d][b] & diff_mask) != diff_mask) {
+							report_mismatch = true;
+							goto out_report_test;
+						}
+					}
+				}
+out_report_test: ;
+			}
+			
+			if (report_mismatch) {
 				NOTIFYF(
 					"%s: Parity mismatch at stripe %llu of chunk %llu offset %llu [%llu..%llu] WHICH COULDN'T BE FIXED."
 					,bdev_get_name(private->this)
@@ -1865,63 +2026,208 @@ regen_permutation:
 					,(unsigned long long)(private->data_disks*(stripe+chunk*private->chunk_size_Blocks))
 					,(unsigned long long)(private->data_disks*(stripe+chunk*private->chunk_size_Blocks+1)-1)
 				);
-				/*
-				for (unsigned column=0;column<private->data_disks+private->parity_disks;++column) {
-					char * tmp=mprintf(
-						"/ramfs/stripes/c%llus%lluC%i.%c%i.read"
-						,(unsigned long long)chunk
-						,(unsigned long long)stripe
-						,column
-						,(column<private->data_disks)?'D':'P'
-						,(column<private->data_disks)?column:(column-private->data_disks)
-					);
-					int fd=open(tmp,O_CREAT|O_TRUNC|O_WRONLY,0666);
-					write(fd,dataptrs[column],512);
-					close(fd);
-					free(tmp);
-				}
-				*/
-#ifdef DON_T_UNCOMMENT_UNLESS_YOU_REALLY_KNOW_WHAT_YOU_ARE_DOING
-				/*
-				unsigned afm[2];
-				afm[0]=2;
-				afm[1]=3;
-				ALGO.recover(nd,2,afm,block_size,dataptrs);
-				for (unsigned column=0;column<private->data_disks+private->parity_disks;++column) {
-					char * tmp=mprintf(
-						"/ramfs/stripes/c%llus%lluC%i.%c%i.raf:D2,D3"
-						,(unsigned long long)chunk
-						,(unsigned long long)stripe
-						,column
-						,(column<private->data_disks)?'D':'P'
-						,(column<private->data_disks)?column:(column-private->data_disks)
-					);
-					int fd=open(tmp,O_CREAT|O_TRUNC|O_WRONLY,0666);
-					write(fd,dataptrs[column],512);
-					close(fd);
-					free(tmp);
-					if (column==2
-					||  column==3) {
-						struct bdev * component=private->disk[private->disk[mapping[column]].layoutmapping].bdev;
-						bdev_write(
-							component,
-							stripe+chunk*private->chunk_size_Blocks,
-							1,
-							dataptrs[column]
+			}
+			
+			if (raid6_dump_blocks_on_parity_mismatch && report_mismatch) {
+				for (unsigned d = 0, nf = 0; d < private->data_disks + private->parity_disks; ++d) {
+					char dp;
+					unsigned i;
+					u8 * dataptr;
+					
+					if (d < private->data_disks) {
+						dp = 'D';
+						i = d;
+						dataptr = d_buffer[i];
+					} else {
+						dp = 'P';
+						i = d - private->data_disks;
+						dataptr = p_buffer[i];
+					}
+					
+					if (private->disk[mapping[d]].layoutmapping == -1) {
+						eprintf(
+							"%s: Can't dump data for block %llu on missing disk (role %u, column %u) representing %c%u of stripe %llu of chunk %llu.\n"
+							, bdev_get_name(private->this)
+							, (unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
+							, mapping[d]
+							, d
+							, dp
+							, i
+							, (unsigned long long)stripe
+							, (unsigned long long)chunk
 						);
+					} else if (nf < num_failed && failmap[nf] == d) {
+						++nf;
+						eprintf(
+							"%s: Can't dump data for block %llu on disk %s (role %u, column %u) representing %c%u of stripe %llu of chunk %llu after read error.\n"
+							, bdev_get_name(private->this)
+							, (unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
+							, bdev_get_name(private->disk[private->disk[mapping[d]].layoutmapping].bdev)
+							, mapping[d]
+							, d
+							, dp
+							, i
+							, (unsigned long long)stripe
+							, (unsigned long long)chunk
+						);
+					} else {
+						eprintf(
+							"%s: Dump of block %llu on disk %s (role %u, column %u) representing %c%u of stripe %llu of chunk %llu (events = %lu, max_events = %lu:\n"
+							, bdev_get_name(private->this)
+							, (unsigned long long)(stripe+chunk*private->chunk_size_Blocks)
+							, bdev_get_name(private->disk[private->disk[mapping[d]].layoutmapping].bdev)
+							, mapping[d]
+							, d
+							, dp
+							, i
+							, (unsigned long long)stripe
+							, (unsigned long long)chunk
+							, (unsigned long)private->disk[mapping[d]].events
+							, (unsigned long)private->max_events
+						);
+						unsigned byte = 0;
+						size_t sl;
+						char * bs_str = mprintf_sl(&sl, "%llx", (unsigned long long)(block_size - 1));
+						free(bs_str);
+						for (unsigned line = 0; line < block_size; line += 16) {
+							eprintf("%0*x:", (int)sl, line);
+							
+							unsigned saved_byte = byte;
+							
+							for (unsigned column = 0; column < 16 && byte < block_size; ++column, ++byte) {
+								char * extra;
+								if (!(column & 3)) {
+									if (column) {
+										extra = " | ";
+									} else {
+										extra = "  ";
+									}
+								} else {
+									extra = " ";
+								}
+								
+								enum mismatch_type {
+									MATCH = 0,
+									IGNORE,
+									LOCAL_IGNORE,
+									ERROR,
+									ASSUME_CORRECT,
+								} mt;
+								char * mt_color[] = {
+									"32",
+									"33;1",
+									"31;1",
+									"31",
+									"32;1",
+								};
+								
+								u8 diff_mask = 0;
+								for (unsigned p = 0; p < private->parity_disks; ++p) {
+									diff_mask |= p_buffer[p][byte] ^ v_buffer[p][byte];
+								}
+								if (!diff_mask) {
+									mt = MATCH;
+								} else {
+									if (!private->verify_parity && private->disk[mapping[d]].events == private->max_events) {
+										mt = ASSUME_CORRECT;
+									} else {
+										if (!i_buffer) {
+											if (d >= private->data_disks || need_data[d]) {
+												mt = ERROR;
+											} else {
+												mt = LOCAL_IGNORE;
+											}
+										} else {
+											mt = IGNORE;
+											for (unsigned dd = 0; dd < private->data_disks; ++dd) {
+												if (i_buffer[dd] && (i_buffer[dd][byte] & diff_mask) != diff_mask) {
+													if (dd == d) {
+														mt = ERROR;
+														break;
+													}
+													mt = LOCAL_IGNORE;
+												}
+											}
+										}
+									}
+								}
+								
+								eprintf("%s\033[%sm%02x\033[0m", extra, mt_color[mt], (unsigned)dataptr[byte]);
+							}
+							
+							byte = saved_byte;
+							
+							eprintf("  ");
+							
+							for (unsigned column = 0; column < 16 && byte < block_size; ++column, ++byte) {
+								if (dataptr[byte] >= 32 && dataptr[byte] < 127) {
+									eprintf("%c", dataptr[byte]);
+								} else {
+									eprintf(".");
+								}
+							}
+							
+							eprintf("\n");
+						}
 					}
 				}
-				*/
-#endif // #ifdef DON_T_UNCOMMENT_UNLESS_YOU_REALLY_KNOW_WHAT_YOU_ARE_DOING
 			}
-			errno=ENOEXEC;
-			return false;
+			
+			if (!i_buffer && !e_buffer) {
+				errno = EIO;
+				return false;
+			}
+			bool ok = true;
+			
+			u8 all_diff_mask = 0;
+			for (unsigned b = 0; b < block_size; ++b) {
+				u8 diff_mask = 0;
+				for (unsigned p = 0; p < private->parity_disks; ++p) {
+					diff_mask |= p_buffer[p][b] ^ v_buffer[p][b];
+				}
+				for (unsigned d = 0; d < private->data_disks; ++d) {
+					if (i_buffer) {
+						if (!i_buffer[d]) {
+							continue;
+						}
+						if ((i_buffer[d][b] & diff_mask) != diff_mask) {
+							ok = false;
+						}
+					} else {
+						all_diff_mask |= diff_mask;
+					}
+					if (e_buffer && e_buffer[d]) {
+						e_buffer[d][b] = diff_mask;
+					}
+				}
+			}
+			if (!i_buffer) {
+				if (all_diff_mask) {
+					ok = false;
+				}
+			}
+			
+			if (!e_buffer && !ok) {
+				errno = EIO;
+				return false;
+			}
+			
+			return true;
 		} // if (!parity_mismatch), else
-	} // if (verify_parity && num_failed!=private->parity_disks)
+	} else { // if (do_verify_parity && num_failed!=private->parity_disks)
+		if (e_buffer) {
+			for (unsigned i = 0; i < private->data_disks; ++i) {
+				if (e_buffer[i]) {
+					memset(e_buffer[i], 0, block_size);
+				}
+			}
+		}
+	} // if (do_verify_parity && num_failed!=private->parity_disks), else
 	return true;
 } // static bool raid6_read_stripe()
 
 static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+	assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
 	struct raid6_component_dev * real_private;
 	{
 		BDEV_PRIVATE(struct raid6_component_dev);
@@ -1931,23 +2237,50 @@ static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t n
 	
 	off_t bs=bdev_get_block_size(private->disk[0].bdev);
 	block_t cs=private->chunk_size_Blocks;
-	u8 d_buffer[private->num_disks*bs];
+	u8 d_buffer[private->data_disks * bs];
+	u8 p_buffer[                  2 * bs];
+	u8 * d_buffer_ptr[private->data_disks + 2];
+	u8 * p_buffer_ptr[private->parity_disks];
+	
+	for (unsigned i = 0; i < private->data_disks; ++i) {
+		d_buffer_ptr[i] = d_buffer + i * bs;
+	}
+	
+	for (unsigned i = 0; i < 2; ++i) {
+		p_buffer_ptr[i] = p_buffer + i * bs;
+	}
 	
 	unsigned role2column[private->num_disks];
 	block_t prev_chunk=first/cs-1;
 	block_t retval=0;
-	bool saved_verify_parity=verify_parity;
-	verify_parity=false;
+	bool saved_verify_parity = private->verify_parity;
+	private->verify_parity = false;
 	for (;num--;++first,++retval) {
 		block_t chunk=first/cs;
 		block_t stripe=first%cs;
-		if (!raid6_read_stripe(private,chunk,stripe,d_buffer,d_buffer+private->data_disks*bs,NULL,NULL)) {
+		unsigned i = role2column[real_private->role];
+		bool is_parity = i >= private->data_disks;
+		if (is_parity) {
+			i -= private->data_disks;
+			assert(i < private->parity_disks);
+			p_buffer_ptr[i] = data;
+		} else {
+			d_buffer_ptr[i] = data;
+		}
+		assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
+		// if (!raid6_read_stripe(private, chunk, stripe, d_buffer_ptr, p_buffer_ptr, NULL, NULL, NULL, NULL)) {
+		if (stripe || p_buffer_ptr[0] || d_buffer_ptr[0]) {
 			if (errno==ENOEXEC) errno=EIO;
-			verify_parity=saved_verify_parity;
+			private->verify_parity = saved_verify_parity;
 			if (retval) {
 				return retval;
 			}
 			return -1;
+		}
+		if (is_parity) {
+			p_buffer_ptr[i] = p_buffer + i * bs;
+		} else {
+			d_buffer_ptr[i] = d_buffer + i * bs;
 		}
 		if (prev_chunk!=chunk) {
 			raid6_get_role_mapping_for_chunk(private,chunk,NULL,role2column);
@@ -1960,19 +2293,26 @@ static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t n
 		}
 		eprintf("\n");
 		*/
-		memcpy(data,d_buffer+bs*role2column[real_private->role],bs);
 		data+=bs;
 	}
-	verify_parity=saved_verify_parity;
+	private->verify_parity = saved_verify_parity;
 	return retval;
 }
 
 static block_t raid6_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
 //	eprintf("raid6_read: ");
-	return raid6_short_read(bdev, first, num, data, NULL);
+	return raid6_do_read(bdev, first, num, data, NULL, NULL);
 }
 
 static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map) {
+	return raid6_do_read(bdev, first, num, data, error_map, NULL);
+}
+
+static block_t raid6_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map) {
+	return raid6_do_read(bdev, first, num, data, error_map, ignore_map);
+}
+
+static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map) {
 	BDEV_PRIVATE(struct raid6_dev);
 //	eprintf("raid6_short_read(%p,%llu,%llu,%p,%p)\n",(void*)private,(unsigned long long)first,(unsigned long long)num,data,error_map);
 	
@@ -2097,10 +2437,9 @@ static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, 
 	 */
 #endif // #if 0
 	
-	u8 d_buffer[private->num_disks*bs];
-	u8 p_buffer[                 2*bs];
-	u8 v_buffer[verify_parity  ? 2*bs: 1];
-	u8 t_buffer[verify_parity  ? 2*bs: 1];
+	u8 * d_buffer_ptr[private->data_disks];
+	u8 * e_buffer_ptr[private->data_disks];
+	const u8 * i_buffer_ptr[private->data_disks];
 	
 	block_t frst_stripe,frst_disk;
 	unsigned num_disks,num_stripes,decrement_stripe;
@@ -2180,14 +2519,38 @@ static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, 
 		block_t retval_add=0;
 		for (block_t s=0;s<num_stripes;++s) {
 			if (debug_striped_reader) eprintf("\t\ts=%llu (stripe=%llu)\n",(long long unsigned)s,(long long unsigned)stripe);
-			bool ok=raid6_read_stripe(private,chunk,stripe,d_buffer,p_buffer,v_buffer,t_buffer);
-/*
-			if (!ok) {
-				eprintf("error_map=%p, errno=%i (%m)",error_map,errno);
+			
+			unsigned d = 0;
+			for (unsigned disk = 0; disk < private->data_disks; ++disk) {
+				if (disk < frst_disk || disk >= frst_disk + num_disks) {
+					d_buffer_ptr[disk] = NULL;
+					e_buffer_ptr[disk] = NULL;
+					i_buffer_ptr[disk] = NULL;
+				} else {
+					if (debug_striped_reader) {
+						eprintf("\t\t\td=%u (disk=%u) [src=x+bs*%u, dst=x+bs*%u]\n",d,disk,(unsigned)disk,(unsigned)(retval+s+d*private->chunk_size_Blocks));
+					}
+					size_t offset = bs * (retval + s + d * private->chunk_size_Blocks);
+							d_buffer_ptr[disk] = data       + offset;
+					if (error_map)  e_buffer_ptr[disk] = error_map  + offset;
+					if (ignore_map) i_buffer_ptr[disk] = ignore_map + offset;
+					++retval_add;
+					++d;
+				}
 			}
-*/
-			if (!ok && (!error_map || errno!=ENOEXEC)) {
-				if (errno==ENOEXEC) errno=EIO;
+			
+			if (stripe == decrement_stripe) {
+				--num_disks;
+			}
+			
+			bool ok = raid6_read_stripe(private
+				, chunk
+				, stripe
+				, d_buffer_ptr
+				, error_map ? e_buffer_ptr : NULL
+				, ignore_map ? i_buffer_ptr : NULL
+			);
+			if (!ok) {
 				if (0) eprintf(
 					"<< raid6_short_read(%p,%llu,%llu,%p) [FAILED(raid6_read_chunk)]\n"
 					,(void*)private
@@ -2197,84 +2560,12 @@ static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, 
 				);
 				retval+=s;
 				if (!retval) {
-/*
-					eprintf(" -> returning -1\n");
-*/
 					return -1;
 				}
-/*
-				eprintf(" -> returning %llu\n",(unsigned long long)retval);
-*/
 				return retval;
 			}
-			if (!ok) {
-/*
-				eprintf(" -> keeping going on\n");
-*/
-				bool dump=false;
-				unsigned mapping[private->num_disks];
-				if (dump) {
-					raid6_get_role_mapping_for_chunk(
-						private,
-						chunk,
-						mapping,
-						NULL
-					);
-					for (unsigned d=0;d<private->data_disks;++d) {
-						eprintf("Contents of data column %u (role %u):\n",d,mapping[d]);
-						hexdump(d_buffer+d*bs,bs);
-					}
-					for (unsigned p=0;p<private->parity_disks;++p) {
-						eprintf("Contents of parity column %u (role %u):\n",p,mapping[private->data_disks+p]);
-						hexdump(p_buffer+p*bs,bs);
-					}
-					for (unsigned p=0;p<private->parity_disks;++p) {
-						eprintf("Contents of verify column %u (role %u):\n",p,mapping[private->data_disks+p]);
-						hexdump(v_buffer+p*bs,bs);
-					}
-				}
-				for (unsigned p=0;p<private->parity_disks;++p) {
-					for (unsigned o=0;o<bs;++o) {
-						v_buffer[o+p*bs]^=p_buffer[o+p*bs];
-					}
-				}
-				if (dump) {
-					for (unsigned p=0;p<private->parity_disks;++p) {
-						eprintf("Contents of verify column %u after XOR p_buffer:\n",p);
-						hexdump(v_buffer+p*bs,bs);
-					}
-				}
-				for (unsigned p=1;p<private->parity_disks;++p) {
-					for (unsigned o=0;o<bs;++o) {
-						v_buffer[o]|=v_buffer[o+p*bs];
-					}
-				}
-				if (dump) {
-					eprintf("Contents of error_map:\n");
-					hexdump(v_buffer,bs);
-				}
-			} else {
-				memset(v_buffer,0,bs);
-			}
-			unsigned disk=frst_disk;
-			/*
-			if (stripe<frst_stripe) {
-				++disk;
-			}
-			*/
-			for (unsigned d=0;d<num_disks;++d,++disk) {
-				if (debug_striped_reader) eprintf("\t\t\td=%u (disk=%u) [src=x+bs*%u, dst=x+bs*%u]\n",d,disk,(unsigned)disk,(unsigned)(retval+s+d*private->chunk_size_Blocks));
-				unsigned char * src=d_buffer+bs*disk;
-				size_t offset=bs*(retval+s+d*private->chunk_size_Blocks);
-				memcpy(data     +offset,src     ,bs);
-				if (error_map) memcpy(error_map+offset,v_buffer,bs);
-				++retval_add;
-			}
-			if (stripe==decrement_stripe) {
-				--num_disks;
-			}
-			if (++stripe==private->chunk_size_Blocks) {
-				stripe=0;
+			if (++stripe == private->chunk_size_Blocks) {
+				stripe = 0;
 				++frst_disk;
 			}
 		}
@@ -2433,6 +2724,7 @@ static block_t raid6_write(struct bdev * bdev, block_t first, block_t num, const
  * is missing).
  */
 static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u8 * data) {
+	assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
 	BDEV_PRIVATE(struct raid6_dev);
 	
 	if (debug_data_reader) eprintf(
@@ -2532,9 +2824,9 @@ static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u
 	}
 	
 	u8 d_buffer[private->num_disks*bs];
-	u8 p_buffer[                 2*bs];
-	u8 v_buffer[verify_parity  ? 2*bs: 1];
-	u8 t_buffer[verify_parity  ? 2*bs: 1];
+	u8 p_buffer[2*bs];
+	u8 v_buffer[private->may_verify_parity ? 2*bs: 1];
+	u8 t_buffer[private->may_verify_parity ? 2*bs: 1];
 	
 	block_t frst_stripe,frst_disk;
 	unsigned num_disks,num_stripes,decrement_stripe;
@@ -2659,7 +2951,9 @@ static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u
 					++retval_add;
 				} else {
 					if (debug_data_reader && private->disk[mapping[disk]].layoutmapping!=-1) eprintf("=%lli\n",(unsigned long long)r);
-					bool ok=raid6_read_stripe(private,chunk,stripe,d_buffer,p_buffer,v_buffer,t_buffer);
+					assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
+					// TODO: -> bool ok=raid6_read_stripe(private,chunk,stripe,d_buffer,p_buffer,v_buffer,t_buffer);
+					bool ok = d_buffer[0] || p_buffer[0] || v_buffer[0] || t_buffer[0]; // Omit warnings while raid6_read_stripe is commented out
 					if (!ok) {
 						if (errno==ENOEXEC) errno=EIO;
 						if (debug_data_reader) eprintf(
@@ -2831,9 +3125,9 @@ static block_t raid6_data_write(struct bdev * bdev, block_t first, block_t num, 
 	
 	/*
 	u8 d_buffer[private->num_disks*bs];
-	u8 p_buffer[                 2*bs];
-	u8 v_buffer[verify_parity  ? 2*bs: 1];
-	u8 t_buffer[verify_parity  ? 2*bs: 1];
+	u8 p_buffer[2*bs];
+	u8 v_buffer[private->may_verify_parity ? 2*bs: 1];
+	u8 t_buffer[private->may_verify_parity ? 2*bs: 1];
 	*/
 	
 	block_t frst_stripe,frst_disk;
