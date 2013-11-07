@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 // #define IGNORE_SUPERBLOCK_DIFFERENCES
 
 #include "raid6_private.h"
@@ -25,25 +29,25 @@
  * Public interface
  */
 bool raid6_verify_parity = false;
-bool raid6_dump_blocks_on_parity_mismatch = true;
+bool raid6_dump_blocks_on_parity_mismatch = false;
 bool raid6_notify_read_error = false;
 
 /*
  * Indirect public interface (via struct dev)
  */
-static block_t raid6_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
-static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u8 * data);
+static block_t raid6_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason);
+static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u8 * data, const char * reason);
 static block_t raid6_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 static bool raid6_destroy(struct bdev * bdev);
 
-static struct bdev * raid6_init(struct bdev_driver * bdev_driver,char * name,const char * args);
+static struct bdev * raid6_init(struct bdev_driver * bdev_driver, char * name, const char * args);
 
 static bool raid6_component_destroy(struct bdev * bdev);
-static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason);
 
-static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map);
-static block_t raid6_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map);
-static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map);
+static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const char * reason);
+static block_t raid6_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map, const char * reason);
+static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map, const char * reason);
 static block_t raid6_data_write(struct bdev * bdev, block_t first, block_t num, const u8 * data);
 
 static bool initialized;
@@ -334,7 +338,7 @@ static int read_super_version_0(struct raid6_disk * disk,bool probing) {
 	
 	bool read_error_warning=false;
 	for (block_t i=0;i<8;++i) {
-		if (1!=bdev_read(disk->bdev,disk->sb_offset+i,1,disk->sb.u8+512*i)) {
+		if (1 != bdev_read(disk->bdev, disk->sb_offset + i, 1, disk->sb.u8 + 512 * i, "raid_sb_v_0")) {
 			if (!i || i==7) {
 				ERRORF("Couldn't read RAID super block of device %s (problem during disk io).",bdev_get_name(disk->bdev));
 				free(disk->sb.v0);
@@ -679,6 +683,7 @@ parse_disk_device_name: ;
 					} // switch (i)
 					if (1!=bdev_read(
 						private->disk[d].bdev,private->disk[d].sb_offset,1,private->disk[d].sb.u8
+						, "raid_sb_v_1"
 					)) {
 						free(private->disk[d].sb.v1);
 						ERROR("Couldn't read RAID super block (disk io).");
@@ -696,6 +701,7 @@ parse_disk_device_name: ;
 						private->disk[d].sb.v1=malloc(nb*512);
 						if (nb!=bdev_read(
 							private->disk[d].bdev,private->disk[d].sb_offset,nb,private->disk[d].sb.u8
+							, "raid_sb_v_1"
 						)) {
 							free(private->disk[d].sb.v1);
 							ERROR("Couldn't read RAID super block (disk io).");
@@ -881,6 +887,7 @@ print_err:
 						private->disk[d].sb.v1=malloc(nb*512);
 						if (nb!=bdev_read(
 							private->disk[d].bdev,private->disk[d].sb_offset,nb,private->disk[d].sb.u8
+							, "raid_sb_v_1"
 						)) {
 							free(private->disk[d].sb.v1);
 							ERROR("Couldn't read RAID super block.");
@@ -1137,7 +1144,7 @@ print_err:
 		private->data_disks*private->size,
 		block_size,
 		raid6_destroy,
-		private
+		(struct bdev_private *)private
 	))) {
 		goto err;
 	}
@@ -1160,7 +1167,7 @@ print_err:
 			private->size,
 			block_size,
 			raid6_component_destroy,
-			components[i]
+			(struct bdev_private *)components[i]
 		))) {
 			ERRORF("raid6: Couldn't register device %s",tmp);
 			free(tmp);
@@ -1181,7 +1188,7 @@ print_err:
 		unsigned max_num=private->data_disks*3*private->chunk_size_Blocks;
 		u8 buffer1[block_size*max_num];
 		u8 buffer2[block_size*max_num];
-		block_t r=bdev_read(retval,0,max_num,buffer1);
+		block_t r = bdev_read(retval, 0, max_num, buffer1, "TODO: reason");
 		if (max_num!=r) {
 			FATALF("raid456:%i: read(0,max_num=%llu)=%llu failed: %s",__LINE__,(unsigned long long)max_num,(unsigned long long)r,strerror(errno));
 		}
@@ -1206,7 +1213,7 @@ print_err:
 					memcpy(buffer2,buffer1,sizeof(buffer2));
 				}
 				dirty=memcmp(buffer2,buffer1,sizeof(buffer2));
-				if (num!=bdev_read(retval,start,num,buffer2+block_size*start)) {
+				if (num != bdev_read(retval, start, num, buffer2 + block_size * start, "TODO: reason")) {
 					FATALF("raid456:%i: read(start=%llu,num=%llu) failed: %s",__LINE__,(unsigned long long)start,(unsigned long long)num,strerror(errno));
 				}
 				dirty=memcmp(buffer2,buffer1,sizeof(buffer2));
@@ -1278,13 +1285,20 @@ static bool raid6_destroy_private(struct raid6_dev * private) {
 	return true;
 }
 
+static inline struct raid6_dev * get_raid6_dev(struct bdev * bdev) {
+	return (struct raid6_dev *)bdev_get_private(bdev);
+}
+
+static inline struct raid6_component_dev * get_raid6_component_dev(struct bdev * bdev) {
+	return (struct raid6_component_dev *)bdev_get_private(bdev);
+}
+
 static bool raid6_destroy(struct bdev * bdev) {
-	BDEV_PRIVATE(struct raid6_dev);
-	return raid6_destroy_private(private);
+	return raid6_destroy_private(get_raid6_dev(bdev));
 }
 
 static bool raid6_component_destroy(struct bdev * bdev) {
-	BDEV_PRIVATE(struct raid6_component_dev);
+	struct raid6_component_dev * private = get_raid6_component_dev(bdev);
 	raid6_destroy_private(private->full_raid);
 	free(private);
 	return true;
@@ -1485,6 +1499,7 @@ static bool raid6_read_stripe(
 	unsigned char * const * d_buffer_ptr,
 	unsigned char * const * e_buffer,
 	const unsigned char * const * i_buffer
+	, const char * reason
 ) {
 	if (debug_striped_reader) eprintf("\t\t\traid6_read_stripe(chunk=%llu,stripe=%llu)\n",(unsigned long long)chunk,(unsigned long long)stripe);
 	
@@ -1530,16 +1545,31 @@ static bool raid6_read_stripe(
 	unsigned failmap[private->parity_disks];
 	for (unsigned i=0;i<private->data_disks;++i) {
 		unsigned d = i;
-		dataptrs[i] = d_buffer[i];
+		dataptrs[d] = d_buffer[i];
 		if (private->disk[mapping[d]].layoutmapping!=-1) {
 			struct bdev * component=private->disk[private->disk[mapping[d]].layoutmapping].bdev;
 			
+			/*
+			 * TODO:
+			 * 
+			 * Mark, whether this is the actual data requested or if this data was only read
+			 * for verify_parity Also, at the same time skip reading data all together, if it
+			 * wasn't requested, verify_parity is false and nothing needs reconstructing.
+			 */
+			char * tmp = mprintf("D%u(chunk[%llu]/stripe[%llu]) for %s"
+				, i
+				, (unsigned long long)chunk
+				, (unsigned long long)stripe
+				, reason
+			);
 			if (1!=bdev_read(
 				component,
 				stripe+chunk*private->chunk_size_Blocks,
 				1,
-				dataptrs[i]
+				dataptrs[d]
+				, tmp
 			)) {
+				free(tmp);
 				if (raid6_notify_read_error)
 				NOTIFYF("%s: Couldn't read D%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
 					,bdev_get_name(private->this)
@@ -1552,6 +1582,7 @@ static bool raid6_read_stripe(
 				);
 				goto data_failed;
 			}
+			free(tmp);
 			/*
 			eprintf(
 				"Data read from data disk %s:\n"
@@ -1574,12 +1605,23 @@ data_failed:
 		// debug_trash=mapping[d];
 		if (private->disk[mapping[d]].layoutmapping!=-1) {
 			struct bdev * component=private->disk[private->disk[mapping[d]].layoutmapping].bdev;
+			
+			// TODO: As above.
+			char * tmp = mprintf("P%u(chunk[%llu]/stripe[%llu]) for %s"
+				, i
+				, (unsigned long long)chunk
+				, (unsigned long long)stripe
+				, reason
+			);
+			
 			if (1!=bdev_read(
 				component,
 				stripe+chunk*private->chunk_size_Blocks,
 				1,
 				dataptrs[d]
+				, tmp
 			)) {
+				free(tmp);
 				if (raid6_notify_read_error)
 				NOTIFYF("%s: Couldn't read P%u from component disk %s (role %u, column %u) at offset %llu (0x%llx)"
 					,bdev_get_name(private->this)
@@ -1592,6 +1634,7 @@ data_failed:
 				);
 				goto parity_failed;
 			}
+			free(tmp);
 			/*
 			eprintf(
 				"Data read from parity disk %s:\n"
@@ -1679,10 +1722,12 @@ retry_main_recovery:
 */
 		u8 * testing_dataptrs[nd];
 		for (unsigned i = 0; i < private->data_disks; ++i) {
-			testing_dataptrs[i] = dataptrs[i];
+			unsigned d = i;
+			testing_dataptrs[d] = dataptrs[i];
 		}
 		for (unsigned i=0;i<2;++i) {
-			testing_dataptrs[private->data_disks + i] = v_buffer[i];
+			unsigned d = private->data_disks + i;
+			testing_dataptrs[d] = v_buffer[i];
 		}
 		ALGO.gen_syndrome(nd, block_size, testing_dataptrs);
 		unsigned parity_mismatch=0;
@@ -2226,20 +2271,17 @@ out_report_test: ;
 	return true;
 } // static bool raid6_read_stripe()
 
-static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason) {
+	ignore(reason);
 	assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
-	struct raid6_component_dev * real_private;
-	{
-		BDEV_PRIVATE(struct raid6_component_dev);
-		real_private = private;
-	}
+	struct raid6_component_dev * real_private = get_raid6_component_dev(bdev);
 	struct raid6_dev * private = real_private->full_raid;
 	
 	off_t bs=bdev_get_block_size(private->disk[0].bdev);
 	block_t cs=private->chunk_size_Blocks;
 	u8 d_buffer[private->data_disks * bs];
 	u8 p_buffer[                  2 * bs];
-	u8 * d_buffer_ptr[private->data_disks + 2];
+	u8 * d_buffer_ptr[private->data_disks];
 	u8 * p_buffer_ptr[private->parity_disks];
 	
 	for (unsigned i = 0; i < private->data_disks; ++i) {
@@ -2268,14 +2310,10 @@ static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t n
 			d_buffer_ptr[i] = data;
 		}
 		assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
-		// if (!raid6_read_stripe(private, chunk, stripe, d_buffer_ptr, p_buffer_ptr, NULL, NULL, NULL, NULL)) {
+		// if (!raid6_read_stripe(private, chunk, stripe, d_buffer_ptr, p_buffer_ptr, NULL, NULL, NULL, NULL, reason)) {
 		if (stripe || p_buffer_ptr[0] || d_buffer_ptr[0]) {
-			if (errno==ENOEXEC) errno=EIO;
 			private->verify_parity = saved_verify_parity;
-			if (retval) {
-				return retval;
-			}
-			return -1;
+			return retval;
 		}
 		if (is_parity) {
 			p_buffer_ptr[i] = p_buffer + i * bs;
@@ -2299,21 +2337,21 @@ static block_t raid6_component_read(struct bdev * bdev, block_t first, block_t n
 	return retval;
 }
 
-static block_t raid6_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+static block_t raid6_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason) {
 //	eprintf("raid6_read: ");
-	return raid6_do_read(bdev, first, num, data, NULL, NULL);
+	return raid6_do_read(bdev, first, num, data, NULL, NULL, reason);
 }
 
-static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map) {
-	return raid6_do_read(bdev, first, num, data, error_map, NULL);
+static block_t raid6_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const char * reason) {
+	return raid6_do_read(bdev, first, num, data, error_map, NULL, reason);
 }
 
-static block_t raid6_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map) {
-	return raid6_do_read(bdev, first, num, data, error_map, ignore_map);
+static block_t raid6_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map, const char * reason) {
+	return raid6_do_read(bdev, first, num, data, error_map, ignore_map, reason);
 }
 
-static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map) {
-	BDEV_PRIVATE(struct raid6_dev);
+static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map, const char * reason) {
+	struct raid6_dev * private = get_raid6_dev(bdev);
 //	eprintf("raid6_short_read(%p,%llu,%llu,%p,%p)\n",(void*)private,(unsigned long long)first,(unsigned long long)num,data,error_map);
 	
 	unsigned bs=bdev_get_block_size(private->disk[0].bdev);
@@ -2324,11 +2362,11 @@ static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 
 	 *  - 3 data disks
 	 *  - two parity disks 
 	 *  - layout LEFT_SYMMETRIC
-	 *  - chunk_size=8*block_size_Bytes (4096 in most cases)
+	 *  - chunk_size = 8 * block_size_Bytes (8 * 512 = 4096 in most cases)
 	 *
 	 * Will have the following on-disk structure.
 	 *
-	 * Chunk 0:
+	 * Chunk 0:    P1   D0   D1   D2   P0
 	 * Stripe  0: Q000 D000 D008 D016 P000 \
 	 * Stripe  1: Q001 D001 D009 D017 P001  |
 	 * Stripe  2: Q002 D002 D010 D018 P002  |
@@ -2338,7 +2376,7 @@ static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 
 	 * Stripe  6: Q006 D006 D014 D022 P006  |
 	 * Stripe  7: Q007 D007 D015 D023 P007 /
 	 *            ---- ---- ---- ---- ----
-	 * Chunk 1:
+	 * Chunk 1:    D0   D1   D2   P0   P1
 	 * Stripe  8: D024 D032 D040 P008 Q008
 	 * Stripe  9: D025 D033 D041 P009 Q009
 	 * Stripe 10: D026 D034 D042 P010 Q010
@@ -2347,9 +2385,9 @@ static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 
 	 * Stripe 13: D029 D037 D045 P013 Q013
 	 * Stripe 14: D030 D038 D046 P014 Q014
 	 * Stripe 15: D031 D039 D047 P015 Q015
-	 * Stripe 16: D056 D064 P016 Q016 D048
 	 *            ---- ---- ---- ---- ----
-	 * Chunk 2:
+	 * Chunk 2:    D1   D2   P0   P1   D0
+	 * Stripe 16: D056 D064 P016 Q016 D048
 	 * Stripe 17: D057 D065 P017 Q017 D049
 	 * Stripe 18: D058 D066 P018 Q018 D050
 	 * Stripe 19: D059 D067 P019 Q019 D051
@@ -2358,21 +2396,21 @@ static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 
 	 * Stripe 22: D062 D070 P022 Q022 D054
 	 * Stripe 23: D063 D071 P023 Q023 D055
 	 *            ---- ---- ---- ---- ----
-	 * Chunk 3:
+	 * Chunk 3:    D2   P0   P1   D0   D1
 	 * Stripe 24: D088 P024 Q024 D072 D080
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 * Stripe 31: D095 P031 Q031 D079 D087
 	 *            ---- ---- ---- ---- ----
-	 * Chunk 4:
+	 * Chunk 4:    P0   P1   D0   D1   D2
 	 * Stripe 32: P032 Q032 D096 D104 D112
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 *              .    .    .    .    .
 	 * Stripe 39: P039 Q039 D103 D111 D119
 	 *            ==== ==== ==== ==== ====
-	 * Chunk 5:
+	 * Chunk 5:    P1   D0   D1   D2   P0
 	 * Stripe 40: Q040 D120 D128 D136 P040
 	 * ...
 	 */
@@ -2549,7 +2587,9 @@ static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 
 				, d_buffer_ptr
 				, error_map ? e_buffer_ptr : NULL
 				, ignore_map ? i_buffer_ptr : NULL
+				, reason
 			);
+			
 			if (!ok) {
 				if (0) eprintf(
 					"<< raid6_short_read(%p,%llu,%llu,%p) [FAILED(raid6_read_chunk)]\n"
@@ -2559,9 +2599,6 @@ static block_t raid6_do_read(struct bdev * bdev, block_t first, block_t num, u8 
 					,data
 				);
 				retval+=s;
-				if (!retval) {
-					return -1;
-				}
 				return retval;
 			}
 			if (++stripe == private->chunk_size_Blocks) {
@@ -2723,9 +2760,9 @@ static block_t raid6_write(struct bdev * bdev, block_t first, block_t num, const
  * reads parity data to reconstruct data after a disk io error (or if the data 
  * is missing).
  */
-static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u8 * data) {
+static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u8 * data, const char * reason) {
 	assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
-	BDEV_PRIVATE(struct raid6_dev);
+	struct raid6_dev * private = get_raid6_dev(bdev);
 	
 	if (debug_data_reader) eprintf(
 		"raid6_data_read(%p,%llu,%llu,%p)\n"
@@ -2939,7 +2976,7 @@ static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u
 						,(unsigned long long)block
 						,data+offset
 					);
-					r=bdev_read(component,block,1,data+offset);
+					r = bdev_read(component, block, 1, data + offset, reason);
 				}
 				if (r==1) {
 					if (debug_data_reader) eprintf("=1\n");
@@ -2952,7 +2989,7 @@ static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u
 				} else {
 					if (debug_data_reader && private->disk[mapping[disk]].layoutmapping!=-1) eprintf("=%lli\n",(unsigned long long)r);
 					assert_never_reached(); // If you hit this so some rechecks, that this code is still valid.
-					// TODO: -> bool ok=raid6_read_stripe(private,chunk,stripe,d_buffer,p_buffer,v_buffer,t_buffer);
+					// TODO: -> bool ok=raid6_read_stripe(private,chunk,stripe,d_buffer,p_buffer,v_buffer,t_buffer,reason);
 					bool ok = d_buffer[0] || p_buffer[0] || v_buffer[0] || t_buffer[0]; // Omit warnings while raid6_read_stripe is commented out
 					if (!ok) {
 						if (errno==ENOEXEC) errno=EIO;
@@ -2964,10 +3001,6 @@ static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u
 							,data
 						);
 						retval+=s;
-						if (!retval) {
-							if (debug_data_reader) eprintf(" -> returning -1\n");
-							return -1;
-						}
 						if (debug_data_reader) eprintf(" -> returning %llu\n",(unsigned long long)retval);
 						return retval;
 					}
@@ -3025,7 +3058,7 @@ static block_t raid6_data_read(struct bdev * bdev, block_t first, block_t num, u
  * process. So it is not senseful for normal disk operation.
  */
 static block_t raid6_data_write(struct bdev * bdev, block_t first, block_t num, const u8 * data) {
-	BDEV_PRIVATE(struct raid6_dev);
+	struct raid6_dev * private = get_raid6_dev(bdev);
 	
 	if (debug_data_writer) eprintf(
 		"raid6_data_write(%p,%llu,%llu,%p)\n"

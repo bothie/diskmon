@@ -1,7 +1,12 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #define _GNU_SOURCE
 
 #include "common.h"
 #include "bdev.h"
+#include "btthread.h"
 
 #include <assert.h>
 #include <btlock.h>
@@ -29,11 +34,13 @@
 // #include <linux/fs.h>
 #include <sys/mount.h>
 
-#define DRIVER_NAME "loop"
+/*
+#ifndef BLKSSZGET
+#define BLKSSZGET  _IO(0x12,104)
+#endif // #ifndef BLKSSZGET
+*/
 
-static inline int gettid() {
-	return syscall(SYS_gettid);
-}
+#define DRIVER_NAME "loop"
 
 /*
  * Public interface
@@ -44,7 +51,7 @@ static inline int gettid() {
 /*
  * Indirect public interface
  */
-static block_t loop_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t loop_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason);
 static block_t loop_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 
 static bool loop_destroy(struct bdev * bdev);
@@ -71,20 +78,20 @@ BDEV_FINI {
  * Implementation - everything non-public (except for init of course).
  */
 
-struct loop_dev {
+struct bdev_private {
 	int fd;
 	struct btlock_lock * lock;
-	struct bdev * bdev;
+//	struct bdev * bdev;
 };
 
-static bool loop_destroy_private(struct loop_dev * private);
+static bool loop_destroy_private(struct bdev_private * private);
 
 // <filename>
 //
 // name will be reowned by init, args will be freed by the caller.
 // static 
 struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args) {
-	struct loop_dev * private=NULL;
+	struct bdev_private * private = NULL;
 	
 	char * filename=mstrcpy(args);	
 	if (!filename) {
@@ -157,7 +164,7 @@ struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char 
 	
 	free(filename);
 	
-	private->bdev=bdev_register_bdev(
+	struct bdev * bdev=bdev_register_bdev(
 		bdev_driver,
 		name,
 		size,
@@ -165,10 +172,10 @@ struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char 
 		loop_destroy,
 		private
 	);
-	if (likely(private->bdev)) {
-		bdev_set_read_function(private->bdev,loop_read);
-		bdev_set_write_function(private->bdev,loop_write);
-		return private->bdev;
+	if (likely(bdev)) {
+		bdev_set_read_function(bdev,loop_read);
+		bdev_set_write_function(bdev,loop_write);
+		return bdev;
 	}
 
 err:
@@ -180,7 +187,7 @@ err:
 	return NULL;
 }
 
-bool loop_destroy_private(struct loop_dev * private) {
+static bool loop_destroy_private(struct bdev_private * private) {
 	btlock_lock_free(private->lock);
 	if (private->fd>=0) {
 		close(private->fd);
@@ -190,12 +197,14 @@ bool loop_destroy_private(struct loop_dev * private) {
 }
 
 static bool loop_destroy(struct bdev * bdev) {
-//	raid6_sync(dev);
-	BDEV_PRIVATE(struct loop_dev);
-	return loop_destroy_private(private);
+	return loop_destroy_private(bdev_get_private(bdev));
 }
 
-static block_t loop_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+static block_t loop_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason) {
+	struct bdev_private * private = bdev_get_private(bdev);
+	
+	ignore(reason);
+	
 	/*
 	struct timespec time;
 	time.tv_sec=0;
@@ -205,96 +214,98 @@ static block_t loop_read(struct bdev * bdev, block_t first, block_t num, unsigne
 	}
 	*/
 	
-	BDEV_PRIVATE(struct loop_dev);
-	
-	if ((first+num)>bdev_get_size(private->bdev)) {
-		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(private->bdev));
+	if ((first+num)>bdev_get_size(bdev)) {
+		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(bdev));
 		errno=EINVAL;
-		return -1;
+		return 0;
 	}
 	
 	btlock_lock(private->lock);
 	
-//	eprintf("Thread %i: got lock of device %s (%i) for reading\n",gettid(),bdev_get_name(private->bdev),private->fd);
-	if (first*bdev_get_block_size(private->bdev)!=lseek(private->fd,first*bdev_get_block_size(private->bdev),SEEK_SET)) {
-//		eprintf("Thread %i: releasing lock of device %s (%i) after error\n",gettid(),bdev_get_name(private->bdev),private->fd);
+//	eprintf("Thread %i: got lock of device %s (%i) for reading\n",gettid(),bdev_get_name(bdev),private->fd);
+	if (first*bdev_get_block_size(bdev)!=lseek(private->fd,first*bdev_get_block_size(bdev),SEEK_SET)) {
+//		eprintf("Thread %i: releasing lock of device %s (%i) after error\n",gettid(),bdev_get_name(bdev),private->fd);
 		btlock_unlock(private->lock);
-		return -1;
+		return 0;
 	}
 	errno=0;
-	off_t r=read(private->fd,data,num*bdev_get_block_size(private->bdev));
-//	eprintf("Thread %i: releasing lock of device %s (%i) after success\n",gettid(),bdev_get_name(private->bdev),private->fd);
+	off_t r=read(private->fd,data,num*bdev_get_block_size(bdev));
+//	eprintf("Thread %i: releasing lock of device %s (%i) after success\n",gettid(),bdev_get_name(bdev),private->fd);
+	int e = errno;
+	
 	btlock_unlock(private->lock);
 	if (0)
 	bprintf(
 		"%s->loop::read(%llu,%llu)=%lli\n"
-		,bdev_get_name(private->bdev)
+		,bdev_get_name(bdev)
 		,(unsigned long long)first
 		,(unsigned long long)num
-		,(signed  long long)((r>=0)?r/bdev_get_block_size(private->bdev):r)
+		,(signed  long long)((r>=0)?r/bdev_get_block_size(bdev):r)
 	);
 	if (r<=0) {
 		NOTIFYF("%s->loop::read(%llu,%llu)=%i: %s"
-			,bdev_get_name(private->bdev)
+			,bdev_get_name(bdev)
 			,(unsigned long long)first
 			,(unsigned long long)num
 			,r?-1:0
-			,strerror(errno)
+			,strerror(e)
 		);
-		if (!errno) {
+		if (!(errno = e)) {
 			errno=EIO;
 		}
-		return -1;
+		return 0;
 	}
-	r/=bdev_get_block_size(private->bdev);
+	r/=bdev_get_block_size(bdev);
 	
 	return r;
 }
 
 static block_t loop_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
-	BDEV_PRIVATE(struct loop_dev);
+	struct bdev_private * private = bdev_get_private(bdev);
 	
-	if ((first+num)>bdev_get_size(private->bdev)) {
-		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(private->bdev));
+	if ((first+num)>bdev_get_size(bdev)) {
+		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(bdev));
 		errno=EINVAL;
-		return -1;
+		return 0;
 	}
 	
 	btlock_lock(private->lock);
 	
-//	eprintf("Thread %i: got lock of device %s (%i) for writing\n",gettid(),bdev_get_name(private->bdev),private->fd);
-	if (first*bdev_get_block_size(private->bdev)!=lseek(private->fd,first*bdev_get_block_size(private->bdev),SEEK_SET)) {
-//		eprintf("Thread %i: releasing lock of device %s (%i) after error\n",gettid(),bdev_get_name(private->bdev),private->fd);
+//	eprintf("Thread %i: got lock of device %s (%i) for writing\n",gettid(),bdev_get_name(bdev),private->fd);
+	if (first*bdev_get_block_size(bdev)!=lseek(private->fd,first*bdev_get_block_size(bdev),SEEK_SET)) {
+//		eprintf("Thread %i: releasing lock of device %s (%i) after error\n",gettid(),bdev_get_name(bdev),private->fd);
 		btlock_unlock(private->lock);
-		return -1;
+		return 0;
 	}
 	errno=0;
-//	w=num*bdev_get_block_size(private->bdev);
-	off_t w=write(private->fd,data,num*bdev_get_block_size(private->bdev));
-//	eprintf("Thread %i: releasing lock of device %s (%i) after success\n",gettid(),bdev_get_name(private->bdev),private->fd);
+//	w=num*bdev_get_block_size(bdev);
+	off_t w=write(private->fd,data,num*bdev_get_block_size(bdev));
+//	eprintf("Thread %i: releasing lock of device %s (%i) after success\n",gettid(),bdev_get_name(bdev),private->fd);
+	int e = errno;
+	
 	btlock_unlock(private->lock);
 	if (0)
 	bprintf(
 		"%s->loop::write(%llu,%llu)=%lli\n"
-		,bdev_get_name(private->bdev)
+		,bdev_get_name(bdev)
 		,(unsigned long long)first
 		,(unsigned long long)num
-		,(signed  long long)((w>=0)?w/bdev_get_block_size(private->bdev):w)
+		,(signed  long long)((w>=0)?w/bdev_get_block_size(bdev):w)
 	);
 	if (w<=0) {
 		NOTIFYF("%s->loop::write(%llu,%llu)=%i: %s"
-			,bdev_get_name(private->bdev)
+			,bdev_get_name(bdev)
 			,(unsigned long long)first
 			,(unsigned long long)num
 			,w?-1:0
-			,strerror(errno)
+			,strerror(e)
 		);
-		if (!errno) {
+		if (!(errno = e)) {
 			errno=EIO;
 		}
-		return -1;
+		return 0;
 	}
-	w/=bdev_get_block_size(private->bdev);
+	w/=bdev_get_block_size(bdev);
 	
 	return w;
 }

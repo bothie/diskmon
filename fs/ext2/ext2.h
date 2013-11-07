@@ -1,6 +1,17 @@
-#define NEED_LONG_LONG
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
+#ifndef EXT2_H
+#define EXT2_H
 
 #include <bttypes.h>
+
+#include "bdev.h"
+
+#include "sc.h"
+
+struct inode_scan_context;
 
 #define MAX_SIZE_FAST_SYMBOLIC_LINK 60
 
@@ -154,7 +165,7 @@ struct super_block {
 /*248*/	u32  overhead_clusters;
 /*24C*/	u32  reserved[108];
 /*3FC*/	u32  checksum;
-/*200*/	// End of Super Block
+/*400*/	// End of Super Block
 };
 
 #define MAGIC 0xEF53
@@ -226,41 +237,15 @@ struct super_block {
  * all other data structures' checksums.  However, the METADATA_CSUM and
  * GDT_CSUM bits are mutually exclusive.
  */
-#define EXT4_FEATURE_RO_COMPAT_METADATA_CSUM	0x0400
+#define EXT4_FEATURE_RO_COMPAT_METADATA_CSUM 0x0400
 
-#define	RW_COMPAT_SUPPORTED (RW_COMPAT_EXT_ATTR)
-#define	IN_COMPAT_SUPPORTED (IN_COMPAT_FILETYPE|IN_COMPAT_RECOVER|IN_COMPAT_META_BG|IN_COMPAT_64BIT)
-#define	RO_COMPAT_SUPPORTED (RO_COMPAT_SPARSE_SUPER|RO_COMPAT_LARGE_FILE|RO_COMPAT_BTREE_DIR)
+#define RW_COMPAT_SUPPORTED (RW_COMPAT_EXT_ATTR)
+#define IN_COMPAT_SUPPORTED (IN_COMPAT_FILETYPE|IN_COMPAT_RECOVER|IN_COMPAT_META_BG|IN_COMPAT_64BIT)
+#define RO_COMPAT_SUPPORTED (RO_COMPAT_SPARSE_SUPER|RO_COMPAT_LARGE_FILE|RO_COMPAT_BTREE_DIR)
 
-#define	RW_COMPAT_UNSUPPORTED ~(RW_COMPAT_EXT_ATTR)
-#define	IN_COMPAT_UNSUPPORTED ~(IN_COMPAT_FILETYPE|IN_COMPAT_RECOVER|IN_COMPAT_META_BG)
-#define	RO_COMPAT_UNSUPPORTED ~(RO_COMPAT_SPARSE_SUPER|RO_COMPAT_LARGE_FILE|RO_COMPAT_BTREE_DIR)
-
-/*
-#if RW_COMPAT_SUPPORTED & RW_COMPAT_UNSUPPORTED
-#error At least one feature flag is contained in both, RW_COMPAT_SUPPORTED & RW_COMPAT_UNSUPPORTED
-#endif
-
-#if IN_COMPAT_SUPPORTED & IN_COMPAT_UNSUPPORTED
-#error At least one feature flag is contained in both, IN_COMPAT_SUPPORTED & IN_COMPAT_UNSUPPORTED
-#endif
-
-#if RO_COMPAT_SUPPORTED & RO_COMPAT_UNSUPPORTED
-#error At least one feature flag is contained in both, RO_COMPAT_SUPPORTED & RO_COMPAT_UNSUPPORTED
-#endif
-
-#if ( RW_COMPAT_SUPPORTED | RW_COMPAT_UNSUPPORTED ) != 0xFFFF
-#error RW_COMPAT_SUPPORTED & RW_COMPAT_UNSUPPORTED together don't contain all possible flags
-#endif
-
-#if ( IN_COMPAT_SUPPORTED | IN_COMPAT_UNSUPPORTED ) != 0xFFFF
-#error IN_COMPAT_SUPPORTED & IN_COMPAT_UNSUPPORTED together don't contain all possible flags
-#endif
-
-#if ( RO_COMPAT_SUPPORTED | RO_COMPAT_UNSUPPORTED ) != 0xFFFF
-#error RO_COMPAT_SUPPORTED & RO_COMPAT_UNSUPPORTED together don't contain all possible flags
-#endif
-*/
+#define RW_COMPAT_UNSUPPORTED ~RW_COMPAT_SUPPORTED
+#define IN_COMPAT_UNSUPPORTED ~IN_COMPAT_SUPPORTED
+#define RO_COMPAT_UNSUPPORTED ~RO_COMPAT_SUPPORTED
 
 /*
  * On-Disk structure of a blocks group descriptor
@@ -456,9 +441,9 @@ struct inode {
 	 * On ext2, clusters are wrongly called "blocks", so creating a 
 	 * disambiguity between blocks and clusters. We use consequently the 
 	 * term cluster where it belongs, and blocks, where it belongs.
-	 * Of course, this file SHOULD be num_clusters, but somebody[TM] 
+	 * Of course, this field SHOULD be num_clusters, but somebody[TM] 
 	 * defined it differently. So, this field really contains the number 
-	 * of hardware blocks.
+	 * of (hardware) blocks.
 	 */
 /*01C*/	u32 num_blocks;                    // Number of ALLOCATED clusters.
 /*020*/	u32 flags;                         // File flags
@@ -602,7 +587,6 @@ struct extent_tail {
 
 #define	INOF_USER_VISIBLE        0x0003DFFF // User visible flags
 #define	INOF_USER_MODIFIABLE     0x000380FF // User modifiable flags
-// #define INOF_UNKNOWN_FLAGS       0x7F800000 // No unknown flag may be set. This mask here is ease checking this requirement.
 
 /*
  * Inode dynamic state flags
@@ -620,6 +604,12 @@ struct extent_tail {
 #define	FT_SOCK 6
 #define	FT_SLNK 7
 // #define	EXT2_FT_MAX      8
+// The following values are used internally only. Currently, ext2 only uses 7 
+// types. As long as this doesn't increase to 252 or more, we're fine ;)
+#define FT_EIO  252
+#define FT_DELE 253
+#define FT_FREE 254
+#define FT_ILLT 255
 
 #define	FTB_FILE  1
 #define	FTB_DIRE  2
@@ -628,6 +618,13 @@ struct extent_tail {
 #define	FTB_FIFO 16
 #define	FTB_SOCK 32
 #define	FTB_SLNK 64
+
+/*
+#define FTB_EIO  128
+#define FTB_DELE 256
+#define FTB_FREE 512
+#define FTB_ILLT 1024
+*/
 
 /*
  * Hint: Octal values, not hexadecimal ;)
@@ -690,7 +687,7 @@ struct journal_superblock_s {
 /* 0x018 */	u32                                   sequence; // first commit ID expected in log
 /* 0x01c */	u32                                   start; // cluster number of start of log
 
-/* 0x020 */	u32                                   errno; // Error value, as set by journal_abort()
+/* 0x020 */	u32                                   error; // Error value, as set by journal_abort()
 		// Remaining fields are only valid in a version-2 superblock
 /* 0x024 */	u32                                   feature_rwcompat; // rw compatible feature set
 /* 0x028 */	u32                                   feature_incompat; // incompatible feature set
@@ -714,3 +711,73 @@ struct journal_superblock_s {
 #define JFS_KNOWN_RW_COMPAT_FEATURES 0
 #define JFS_KNOWN_RO_COMPAT_FEATURES 0
 #define JFS_KNOWN_IN_COMPAT_FEATURES JFS_FEATURE_INCOMPAT_REVOKE
+
+bool read_super(struct scan_context * sc, struct super_block * sb, unsigned long group, block_t offset, bool probing);
+bool group_has_super_block(const struct super_block * sb,unsigned group);
+void write_super_blocks(struct super_block * sb);
+bool read_table_for_one_group(struct scan_context * sc,bool prefetching);
+void typecheck_inode(struct inode_scan_context * isc,struct inode * inode);
+bool check_inode(struct scan_context * sc,unsigned long inode_num,bool prefetching,bool expected_to_be_free);
+
+static inline unsigned long get_inodes_cluster(struct scan_context * sc,unsigned long inode_num) {
+	return
+		sc->gdt[(inode_num-1)/sc->sb->inodes_per_group].inode_table
+		+((inode_num-1)%sc->sb->inodes_per_group)*128/sc->cluster_size_Bytes
+	;
+}
+
+#define EXT2_ERRORF_DIR(isc,filename,fmt,...) do { \
+	ERRORF( \
+		"%s: Inode %lu (cluster %lu) [%s] (%s): "fmt \
+		,isc->sc->name \
+		,isc->inode_num \
+		,get_inodes_cluster(isc->sc,isc->inode_num) \
+		,isc->type \
+		,filename \
+		,__VA_ARGS__ \
+	); \
+} while (0)
+#define EXT2_ERROR_DIR(isc,filename,msg) EXT2_ERRORF_DIR(isc,filename,"%s",msg)
+
+#define EXT2_ERRORF(isc,fmt,...) do { \
+	ERRORF( \
+		"%s: Inode %lu (cluster %lu) [%s]: "fmt \
+		,isc->sc->name \
+		,isc->inode_num \
+		,get_inodes_cluster(isc->sc,isc->inode_num) \
+		,isc->type \
+		,__VA_ARGS__ \
+	); \
+} while (0)
+#define EXT2_ERROR(isc,msg) EXT2_ERRORF(isc,"%s",msg)
+
+#define EXT2_NOTIFYF_DIR(isc,filename,fmt,...) do { \
+	NOTIFYF( \
+		"%s: Inode %lu (cluster %lu) [%s] (%s): "fmt \
+		,isc->sc->name \
+		,isc->inode_num \
+		,get_inodes_cluster(isc->sc,isc->inode_num) \
+		,isc->type \
+		,filename \
+		,__VA_ARGS__ \
+	); \
+} while (0)
+#define EXT2_NOTIFY_DIR(isc,filename,msg) EXT2_NOTIFYF_DIR(isc,filename,"%s",msg)
+
+#define EXT2_NOTIFYF(isc,fmt,...) do { \
+	NOTIFYF( \
+		"%s: Inode %lu (cluster %lu) [%s]: "fmt \
+		,isc->sc->name \
+		,isc->inode_num \
+		,get_inodes_cluster(isc->sc,isc->inode_num) \
+		,isc->type \
+		,__VA_ARGS__ \
+	); \
+} while (0)
+#define EXT2_NOTIFY(isc,msg) EXT2_NOTIFYF(isc,"%s",msg)
+
+void ext2_dump_file_by_path(struct scan_context * sc, const char * path, const char * filename);
+bool ext2_dump_file_by_inode(struct scan_context * sc, u32 inode_num, const char * path, const char * filename_msg);
+void ext2_redump_file(struct scan_context * sc, const char * path, const char * filename);
+
+#endif // #ifndef EXT2_H

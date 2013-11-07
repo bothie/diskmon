@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #include "common.h"
 #include "crc.h"
 #include "bdev.h"
@@ -55,11 +59,11 @@ struct lvm_bdev;
 
 static bool lvm_destroy(struct lvm_bdev * bdev);
 
-static block_t lv_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t lv_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason);
 static block_t lv_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 static bool lv_destroy(struct bdev * bdev);
-static block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map);
-static block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map);
+static block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const char * reason);
+static block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map, const char * reason);
 
 static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const char * args);
 
@@ -765,7 +769,6 @@ struct pv {
 };
 
 struct lvm_bdev {
-//	struct bdev this;
 	unsigned ndisks;
 	struct bdev * * bdev;
 	struct pv * pv;
@@ -773,8 +776,7 @@ struct lvm_bdev {
 	unsigned refcount;
 };
 
-struct lv_bdev {
-//	struct bdev this;
+struct bdev_private {
 	struct lvm_bdev * vg;
 	int lvnum;
 };
@@ -785,7 +787,7 @@ struct lv_bdev {
 static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const char * args) {
 	int num_disks;
 	const char * arg_p;
-	struct lv_bdev * * lvs=NULL;
+	struct bdev_private * * lvs=NULL;
 	
 	free(name); // Not needed here (at least not until now)
 	
@@ -849,7 +851,7 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 				goto err;
 			}
 		}
-		if (1!=bdev_read(lvm->bdev[num_disks],1,1,buffer)) {
+		if (1 != bdev_read(lvm->bdev[num_disks], 1, 1, buffer, "lvm-pv-sb")) {
 			ERROR("Couldn't read PV superblock");
 			goto err;
 		}
@@ -858,7 +860,6 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 			goto err;
 		}
 		if (pv->crc!=calc_crc(
-			INITIAL_CRC,
 			&pv->offset,
 			512-((unsigned char *)&pv->offset-(unsigned char *)pv)
 		)) {
@@ -903,12 +904,12 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 			lvm->bdev[num_disks],
 			lvm->pv[num_disks].meta_start/bdev_get_block_size(lvm->bdev[0]),
 			1,buffer
+			, "lvm-vg-sb"
 		)) {
 			ERROR("Couldn't read VG superblock");
 			goto err;
 		}
 		if (vg->checksum!=calc_crc(
-			INITIAL_CRC,
 			&vg->magic,
 			512-(((unsigned char *)&(vg->magic))-(unsigned char *)vg)
 		)) {
@@ -939,13 +940,13 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 			lvm->bdev[num_disks],
 			(lvm->pv[num_disks].conf_start+lvm->pv[num_disks].meta_start)/bdev_get_block_size(lvm->bdev[0]),
 			num_blocks,lvm->pv[num_disks].conf
+			, "lvm-lv-conf"
 		)) {
 			ERROR("Couldn't read LVM metadata.");
 			goto err;
 		}
 		uint32_t crc;
 		if (vg->vg_metadata_area.checksum!=(crc=calc_crc(
-			INITIAL_CRC,
 			lvm->pv[num_disks].conf,
 			lvm->pv[num_disks].conf_size
 		))) {
@@ -1187,6 +1188,7 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 	
 	// Return a non-NULL pointer to make a check like "if (!init(...)) 
 	// exit(2);" fail, but don't give 'em a valid pointer.
+	
 	return (struct bdev *)0xdeadbeef;
 
 err:
@@ -1221,7 +1223,7 @@ bool lvm_destroy(struct lvm_bdev * lvm) {
 }
 
 bool lv_destroy(struct bdev * bdev) {
-	BDEV_PRIVATE(struct lv_bdev);
+	struct bdev_private * private = bdev_get_private(bdev);
 	
 	if (!--private->vg->refcount) {
 		lvm_destroy(private->vg);
@@ -1230,16 +1232,16 @@ bool lv_destroy(struct bdev * bdev) {
 	return true;
 }
 
-block_t lv_read(struct bdev * bdev, block_t first, block_t num, u8 * data) {
-	return lv_disaster_read(bdev, first, num, data, NULL, NULL);
+block_t lv_read(struct bdev * bdev, block_t first, block_t num, u8 * data, const char * reason) {
+	return lv_disaster_read(bdev, first, num, data, NULL, NULL, reason);
 }
 
-block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map) {
-	return lv_disaster_read(bdev, first, num, data, error_map, NULL);
+block_t lv_short_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const char * reason) {
+	return lv_disaster_read(bdev, first, num, data, error_map, NULL, reason);
 }
 
-block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map) {
-	BDEV_PRIVATE(struct lv_bdev); struct lv_bdev * lv_bdev = private;
+block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * data, u8 * error_map, const u8 * ignore_map, const char * reason) {
+	struct bdev_private * lv_bdev = bdev_get_private(bdev);
 	
 //	struct bdev * * vg_bdev=lv_bdev->vg->bdev;
 	struct conf * conf=lv_bdev->vg->conf;
@@ -1267,6 +1269,7 @@ block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * da
 					data,
 					error_map,
 					ignore_map
+					, reason
 				);
 			} else if (error_map) {
 				r=bdev_short_read(
@@ -1275,6 +1278,7 @@ block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * da
 					sn,
 					data,
 					error_map
+					, reason
 				);
 			} else {
 				r=bdev_read(
@@ -1282,14 +1286,11 @@ block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * da
 					cpv->first_pe_start_block+pso+ro,
 					sn,
 					data
+					, reason
 				);
 			}
-			if (r==(block_t)-1) {
-				if (retval) {
-					return retval;
-				} else {
-					return -1;
-				}
+			if (!r) {
+				return retval;
 			}
 			retval+=r;
 			num-=sn;
@@ -1315,7 +1316,7 @@ block_t lv_disaster_read(struct bdev * bdev, block_t first, block_t num, u8 * da
 }
 
 block_t lv_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
-	BDEV_PRIVATE(struct lv_bdev); struct lv_bdev * lv_bdev = private;
+	struct bdev_private * lv_bdev = bdev_get_private(bdev);
 	
 //	struct bdev * * vg_bdev=lv_bdev->vg->bdev;
 	struct conf * conf=lv_bdev->vg->conf;
@@ -1340,12 +1341,8 @@ block_t lv_write(struct bdev * bdev, block_t first, block_t num, const unsigned 
 				sn,
 				data
 			);
-			if (w==(block_t)-1) {
-				if (retval) {
-					return retval;
-				} else {
-					return -1;
-				}
+			if (!w) {
+				return retval;
 			}
 			retval+=w;
 			num-=sn;

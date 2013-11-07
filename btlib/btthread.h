@@ -1,30 +1,24 @@
-#ifdef BTCLONE
+#ifndef BTTHREAD_H
+#define BTTHREAD_H
 
-#include <linux/sched.h>
-extern int clone(int (*)(void *),void *,int,void *,...);
-#define THREAD_RETURN_TYPE int
-#define THREAD_RETURN() do { return 0; } while (0)
+#ifndef THREADS
+#	include "btthread_nothreads.h"
 
-int btclone(void * * stack_memory,int (*thread_main)(void * arg),size_t stack_size,int flags,void * arg);
+#else // #ifndef THREADS
+#	ifdef BTCLONE
+#		include "btthread_btclone.h"
+#	else // #ifdef BTCLONE
+#		include "btthread_pthread.h"
+#	endif // #ifdef BTCLONE, else
 
-#else // #ifdef BTCLONE
+#include <stdbool.h>
 
-#include <pthread.h>
-#define THREAD_RETURN_TYPE void * 
-#define THREAD_RETURN() do { return NULL; } while (0)
+// #include <stdlib.h>
 
-#endif // #ifdef BTCLONE, else
+struct thread_ctx * create_thread(size_t min_stack_size, THREAD_RETURN_TYPE (*thread_function)(THREAD_ARGUMENT_TYPE), THREAD_ARGUMENT_TYPE arg);
+void cleanup_thread(struct thread_ctx * thread_ctx);
+bool terminated_thread(struct thread_ctx * thread_ctx);
 
-#define COMPILER_BARRIER() __asm__ __volatile__ ("" ::: "memory")
+#endif // #ifndef THREADS, else
 
-#define GENERAL_BARRIER() do { \
-	COMPILER_BARRIER(); \
-	__sync_synchronize(); \
-} while(0)
-
-#include <sys/syscall.h>
-#include <unistd.h>
-
-static inline int gettid() {
-	return syscall(SYS_gettid);
-}
+#endif // #ifndef BTTHREAD_H

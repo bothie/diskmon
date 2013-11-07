@@ -1,17 +1,28 @@
 #! /bin/sh
+#
+# diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+#
 
 (
 	cat >&5 <<EOF
 struct bdev {
-	void * private;
+	struct bdev_private * private;
 	char * name;
 	block_t size;
 	unsigned block_size;
 	
 EOF
 	echo "#define BDEV_CLEAR_FUNCTION_POINTERS(bdev) do {\\" >&6
-	for name in destroy read write short_read disaster_read mmapro mmaprw munmap
-	do
+	for name in \
+		destroy \
+		read \
+		write \
+		short_read \
+		disaster_read \
+		mmapro \
+		mmaprw \
+		munmap \
+	; do
 		rettype="&error"
 		arglist="%error"
 		reterror="§error"
@@ -33,9 +44,9 @@ EOF
 			
 			read)
 				rettype="block_t"
-				arglist="block_t first, block_t num, unsigned char * data"
+				arglist="block_t first, block_t num, unsigned char * data, const char * reason"
 				reterror="-1"
-				args="first, num, data"
+				args="first, num, data, reason"
 				cleanup_code=""
 				;;
 			
@@ -49,17 +60,17 @@ EOF
 			
 			short_read)
 				rettype="block_t"
-				arglist="block_t first, block_t num, unsigned char * data, unsigned char * error_map"
+				arglist="block_t first, block_t num, unsigned char * data, unsigned char * error_map, const char * reason"
 				reterror="-1"
-				args="first, num, data, error_map"
+				args="first, num, data, error_map, reason"
 				cleanup_code=""
 				;;
 			
 			disaster_read)
 				rettype="block_t"
-				arglist="block_t first, block_t num, unsigned char * data, unsigned char * error_map, const unsigned char * ignore_map"
+				arglist="block_t first, block_t num, unsigned char * data, unsigned char * error_map, const unsigned char * ignore_map, const char * reason"
 				reterror="-1"
-				args="first, num, data, error_map, ignore_map"
+				args="first, num, data, error_map, ignore_map, reason"
 				cleanup_code=""
 				;;
 			

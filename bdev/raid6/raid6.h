@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #ifndef RAID6_H
 #define RAID6_H
 
@@ -8,9 +12,6 @@
 
 #include <bttypes.h>
 
-// struct dev;
-
-// struct dev * raid6_init(char * name,char * args);
 extern bool raid6_verify_parity;
 
 struct raid6_calls {
@@ -18,7 +19,10 @@ struct raid6_calls {
 	void (*recover)(unsigned ndisks,unsigned nfailed,unsigned * failmap,size_t bytes,u8 * * ptrs);
 };
 
-/* Galois field tables */
+/*
+ * Galois field tables
+ * (defined in raid6tables.c)
+ */
 extern const u8 raid6_gfmul[256][256] __attribute__((aligned(256)));
 extern const u8 raid6_gfexp[256]      __attribute__((aligned(256)));
 extern const u8 raid6_gfinv[256]      __attribute__((aligned(256)));

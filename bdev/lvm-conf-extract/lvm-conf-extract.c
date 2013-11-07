@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #include "common.h"
 #include "bdev.h"
 
@@ -118,7 +122,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		return NULL;
 	}
 	
-	bdev_read(bdev,1,1,ubuffer);
+	bdev_read(bdev, 1, 1, ubuffer, "lvm-pv-sb");
 	
 	char * confname=NULL;
 	int conf_fd=0;
@@ -163,7 +167,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 	
 	NOTIFYF("Reading PV %s\n",uuid);
 	
-	bdev_read(bdev,8,1,ubuffer);
+	bdev_read(bdev, 8, 1, ubuffer, "lvm-vg-sb");
 	
 	confname=mprintf("%s.vg",name);
 	if (!confname) {
@@ -198,7 +202,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		full_bytes=0;
 		int bytes;
 		do {
-			bdev_read(bdev,block,1,ubuffer);
+			bdev_read(bdev, block, 1, ubuffer, "lvm-lv-conf");
 			for (bytes=0;bytes<512 && ubuffer[bytes];++bytes) ;
 			if (bytes) {
 				if (!full_bytes) {

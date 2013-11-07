@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #ifndef IV_H
 #define IV_H
 
@@ -14,14 +18,18 @@
 #define zmalloc(size) calloc(1,size)
 #endif // #ifndef zmalloc
 
-// typedef void (*dm_crypt_iv_use_function)(struct crypt_alg_ctx * ctx,block_t block_number);
+/*
+typedef void (*dm_crypt_iv_use_function)(struct crypt_alg_ctx * ctx,block_t block_number);
+*/
 typedef void (*dm_crypt_iv_generate_function)(void * buffer,block_t block_number);
 
 struct dm_crypt_iv {
 	const char * name;
 	unsigned iv_size;
 	
-//	dm_crypt_iv_use_function use;
+	/*
+	dm_crypt_iv_use_function use;
+	*/
 	dm_crypt_iv_generate_function generate;
 };
 

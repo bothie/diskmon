@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #include "common.h"
 #include "bdev.h"
 
@@ -42,11 +46,12 @@ BDEV_FINI {
 	}
 }
 
-block_t my_bdev_read(struct bdev * dev,block_t first,block_t num,unsigned char * data) {
-	return bdev_read(dev,first,num,data);
+block_t my_bdev_read(struct bdev * dev, block_t first, block_t num, unsigned char * data, const char * reason) {
+	return bdev_read(dev, first, num, data, reason);
 }
 
-block_t my_bdev_write(struct bdev * dev,block_t first,block_t num,unsigned char * data) {
+block_t my_bdev_write(struct bdev * dev, block_t first, block_t num, unsigned char * data, const char * reason) {
+	ignore(reason); // TODO
 	return bdev_write(dev,first,num,data);
 }
 
@@ -67,7 +72,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 	block_t addr=0;
 	block_t size=0;
 	
-	block_t (*bdev_rw)(struct bdev * dev,block_t first,block_t num,unsigned char * data)=NULL;
+	block_t (*bdev_rw)(struct bdev * dev, block_t first, block_t num, unsigned char * data, const char * reason) = NULL;
 	ssize_t (*posix_rw)(int fd,void * buf,size_t count)=NULL;
 	bool dumping_to_file;
 	int fd=-1;
@@ -162,9 +167,13 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 	bttime_t start_time=bttime();
 	bttime_t prev_time=start_time-1000000000LLU;
 	bttime_t curr_time;
-	char * t;
-	int format_size=strlen(t=mprintf("%llu",(unsigned long long)size));
-	free(t);
+	int format_size;
+	{
+		size_t sl;
+		char * t = mprintf_sl(&sl, "%llu", (unsigned long long)size);
+		format_size = sl;
+		free(t);
+	}
 	block_t errors=0;
 	while (addr<size) {
 		u8 * memory=NULL;
@@ -214,7 +223,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 				,(void *)buffer
 			);
 			*/
-			block_t r=bdev_rw(bdev,addr,chunk_size,buffer);
+			block_t r = bdev_rw(bdev, addr, chunk_size, buffer, "dump");
 			if (dumping_to_file) {
 				if (r!=chunk_size) {
 					ERRORF(

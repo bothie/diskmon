@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #include "common.h"
 #include "bdev.h"
 
@@ -158,7 +162,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 			if (!buffer) {
 				buffer=malloc(chunk_size*bdev_get_block_size(bdev));
 			}
-			block_t r=bdev_read(bdev,addr,chunk_size,buffer);
+			block_t r = bdev_read(bdev, addr, chunk_size, buffer, "blindread");
 			if (r!=(block_t)-1) {
 				/* Uncomment only for debugging!
 #warning WRITE CODE IN blindread IS ACTIVATED. DO NOT USE THIS IN PRODUCTIVE ENVIRONMENTS.

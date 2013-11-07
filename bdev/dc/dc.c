@@ -1,7 +1,7 @@
 /*
- * In anlehnung an dd für disk dump:
- *
- * dc = disc compare
+ * dc = disc compare - in Anlehnung an dd für disk dump.
+ * 
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
  */
 
 #include "common.h"
@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <mprintf.h>
+#include <parseutil.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,8 @@ struct dc {
 	block_t num_blocks;
 	u8 * buffer;
 	bool ignore;
+	bool report_all_read_errors;
+	bool report_first_read_error;
 	bool printed;
 	bool dump;
 };
@@ -72,7 +75,8 @@ VASIAR(struct dc) device;
  *
  * size:dev1[@offset1],dev2[@offset2][,dev3[@offset3][...]]
  *
- * size may be -1 for full device
+ * size may be -1 (for backwards compatibility) or empty (argument starts
+ * with colon or with a device name itself) for full device(s)
  */
 static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args) {
 	ignore(bdev_driver);
@@ -81,27 +85,38 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 	bool dump_differences=true; // false;
 	
 	struct bdev * retval=NULL;
-	const char * s=args;
 	const char * p=args;
 	
 	block_t chunk_size=128;
 	size_t block_size=0;
 	block_t max_blocks=0;
-//	block_t max_blocks2=0;
 	
-	errno=0;
-	block_t size = strtoll(s, (char * *)&p, 0);
-//	eprintf("bdev_init: size=%llu, s=\"%s\", p=\"%s\"\n",(unsigned long long)size,s,p);
-	if (*p!=':'
-	||  ((size!=(block_t)-1) && (size>=LLONG_MAX || (size<0)))) {
-		ERROR("Couldn't parse size argument. Syntax is: \"size:dev1[@offset1],dev2[@offset2][,dev3[@offset3][...]]\".");
-		return NULL;
+	errno = 0;
+	bool have_size = false;
+	block_t size = 0; // warning: 'size' could be used uninitialized in this function. (it's protected by have_size)
+	
+	if (!strstartcmp(p, "-1:")) {
+		p += 3;
+	} else if (!strstartcmp(p, ":")) {
+		++p;
+	} else {
+		volatile unsigned long long s;
+		volatile block_t _size;
+		if (':' == parse_unsigned_long_long(&p, &s)) {
+			have_size = true;
+			size = _size = s;
+			assert((unsigned long long)_size == s);
+			parse_skip(&p, ':');
+		} else {
+			p = args;
+		}
 	}
-	s=++p;
+	
 	if (!*p) {
 		ERROR("No devices named in arguments.");
 		goto err;
 	}
+	
 	do {
 		/*
 		 * Starting with the second loop, we must skip the ',' 
@@ -109,36 +124,36 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		 * generation of the argument line by scripts.
 		 */
 		if (*p==',') {
-			s=++p;
+			++p;
 		}
-		while (*p && *p!='@' && *p!=',') ++p;
-		if (!(p-s)) {
-			ERROR("Couldn't parse arguments (empty device name).");
-			goto err;
-		}
-		
-		char * name=malloc(p-s+1);
-		if (!name) {
-			ERROR("Couldn't allocate memory for device name.");
-			goto err;
-		}
-		memcpy(name,s,p-s);
-		name[p-s]=0;
-		struct dc * dv=&VANEW(device);
-		dv->ignore=false;
-		dv->name=name;
-/*
-		printf("VASIZE(device)=%i:\n",VASIZE(device));
-		for (size_t i=0;i<VASIZE(device);++i) {
-			printf("\tdevice[%i].name=\"%s\"\n",i,VAACCESS(device,i).name);
-		}
-*/
-		dv->buffer=NULL;
-		dv->bdev=bdev_lookup_bdev(name);
-		if (!dv->bdev) {
-			ERRORF("Couldn't lookup device %s.",name);
-			eprintf("vs=%u,p=%s\ns=%s\n",(unsigned)VASIZE(device),p,s);
-			goto err;
+		struct dc * dv;
+		{
+			const char * s=p;
+			while (*p && *p!='@' && *p!=',') ++p;
+			if (!(p-s)) {
+				ERROR("Couldn't parse arguments (empty device name).");
+				goto err;
+			}
+			
+			char * name=malloc(p-s+1);
+			if (!name) {
+				ERROR("Couldn't allocate memory for device name.");
+				goto err;
+			}
+			memcpy(name,s,p-s);
+			name[p-s]=0;
+			dv=&VANEW(device);
+			dv->ignore=false;
+			dv->report_all_read_errors = false;
+			dv->report_first_read_error = true;
+			dv->name=name;
+			dv->buffer=NULL;
+			dv->bdev=bdev_lookup_bdev(name);
+			if (!dv->bdev) {
+				ERRORF("Couldn't lookup device %s.",name);
+				eprintf("vs=%u,p=%s\ns=%s\n",(unsigned)VASIZE(device),p,s);
+				goto err;
+			}
 		}
 		if (VASIZE(device)==1) {
 			block_size=bdev_get_block_size(dv->bdev);
@@ -159,31 +174,31 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 			ERROR("Couldn't allocate memory for data buffer.");
 			goto err;
 		}
-		if (*p!='@') {
+		if (!parse_skip(&p,'@')) {
 			dv->offset=0;
 		} else {
-			s=p+1;
 			errno=0;
-			dv->offset = strtoull(s, (char * *)&p, 0);
-			if (dv->offset>=LLONG_MAX || dv->offset<0) {
+			unsigned long o;
+			if (!parse_unsigned_long(&p,&o) && pwerrno) {
 				ERRORF(
-					"Couldn't parse offset for %ith device (%s)."
-					, (int)(VASIZE(device))
+					"Couldn't parse offset ([%s]) for %ith device (%s): %s."
+					, p
+					, VASIZE(device)
 					, name
+					, pwerror(pwerrno)
 				);
 				goto err;
 			}
+			dv->offset = o;
 		}
-		dv->num_blocks=bdev_get_size(dv->bdev)-dv->offset;
-		block_t nb=dv->num_blocks;
-		if (nb>max_blocks) {
-//			max_blocks2=max_blocks;
-			max_blocks=nb;
-		}
-		if (size==(block_t)-1) {
-			size=nb;
+		dv->num_blocks = bdev_get_size(dv->bdev);
+		if (dv->num_blocks < dv->offset) {
+			dv->num_blocks = 0;
 		} else {
-			if (nb>size) nb=size;
+			dv->num_blocks -= dv->offset;
+		}
+		if (dv->num_blocks > max_blocks) {
+			max_blocks = dv->num_blocks;
 		}
 	} while (*p==',');
 	
@@ -200,7 +215,11 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		goto err;
 	}
 	
-	block_t addr=1;
+	if (have_size && size < max_blocks) {
+		max_blocks = size;
+	}
+	
+	block_t addr = 0;
 	
 	bool duplicate_errors_on_stdout=false;
 	{
@@ -220,8 +239,8 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		
 		for (i=0;i<VASIZE(device);++i) {
 			struct dc * d=&VAACCESS(device,i);
-			if (unlikely(addr>=d->num_blocks)) {
-				if (unlikely(addr==d->num_blocks)) {
+			if (unlikely(addr >= d->num_blocks)) {
+				if (unlikely(addr == d->num_blocks)) {
 					eprintf(
 						"dc: EOF on %s reached @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
 						, d->name
@@ -240,7 +259,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 					);
 					PRINT_PROGRESS_BAR(addr);
 				}
-				d->ignore=true;
+				d->ignore = true;
 				continue;
 			}
 			if (addr+cs>d->num_blocks) {
@@ -251,36 +270,41 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		for (i=0;i<VASIZE(device);++i) {
 			struct dc * d=&VAACCESS(device,i);
 			if (unlikely(addr>=d->num_blocks)) {
-//				eprintf("Skipping %i. device.\n",i+1);
 				continue;
 			}
 retry:
 			ignore(i);
-			block_t r=bdev_read(d->bdev,d->offset+addr,cs,d->buffer);
-			d->ignore=false;
+			block_t r = bdev_read(d->bdev, d->offset + addr, cs, d->buffer, "dc");
 			if (r!=cs) {
-				eprintf("Read problems ...\r");
+				if (d->report_all_read_errors || d->report_first_read_error) {
+					eprintf("Read problems ...\r");
+				}
 				if (cs!=1) {
 					cs>>=1;
 					goto retry;
 				}
-				eprintf(
-					"dc: Read error on device %s @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
-					, d->name
-					, (unsigned long long)(d->offset + addr)
-					, (unsigned long long)(d->offset + addr)
-					, (unsigned long long)(addr)
-					, (unsigned long long)(addr)
-				);
-				if (duplicate_errors_on_stdout) printf(
-					"dc: Read error on device %s @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
-					, d->name
-					, (unsigned long long)(d->offset + addr)
-					, (unsigned long long)(d->offset + addr)
-					, (unsigned long long)(addr)
-					, (unsigned long long)(addr)
-				);
-				d->ignore=true;
+				memset(d->buffer, 0, block_size);
+				if (d->report_all_read_errors || d->report_first_read_error) {
+					eprintf(
+						"dc: %sead error on device %s @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
+						, d->report_first_read_error?"First r":"R"
+						, d->name
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(addr)
+						, (unsigned long long)(addr)
+					);
+					if (duplicate_errors_on_stdout) printf(
+						"dc: %sead error on device %s @ block %llu (0x%llx) after %llu (0x%llx) blocks.\n"
+						, d->report_first_read_error?"First r":"R"
+						, d->name
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(d->offset + addr)
+						, (unsigned long long)(addr)
+						, (unsigned long long)(addr)
+					);
+					d->report_first_read_error = false;
+				}
 				PRINT_PROGRESS_BAR(addr);
 			}
 		}
@@ -377,7 +401,7 @@ retry:
 					if (duplicate_errors_on_stdout) printf(
 						" %s@%llu"
 						, di->name
-						, (unsigned long long)(di->offset+addr)
+						, (unsigned long long)(di->offset + addr)
 					);
 					for (j=i+1;j<VASIZE(device);++j) {
 						struct dc * dj=&VAACCESS(device,j);

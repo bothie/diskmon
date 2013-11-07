@@ -1,11 +1,16 @@
 /*
- * Plain IV generation algorithm:
- *
- * the initial vector is the little-endian version of the lower 32-bit of the 
- * block number, padded with zeros if neccessary.
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
+/*
+ * Null IV generation algorithm:
+ * 
+ * the initial vector is only zeros.
  */
 
 #include "iv.h"
+
+#include <string.h>
 
 #define IV_NAME "null"
 
@@ -29,5 +34,7 @@ CRYPT_FINI {
 
 void dm_crypt_iv_null_generate(void * buffer,block_t block_number) {
 	ignore(block_number);
-	*(u8 *)buffer=0;
+	
+	u8 * iv = buffer;
+	memset(iv, 0, 16);
 }

@@ -1,4 +1,8 @@
 /*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
+/*
  * Plain IV generation algorithm:
  *
  * the initial vector is the little-endian version of the lower 32-bit of the 
@@ -40,14 +44,6 @@ void dm_crypt_iv_plain_generate(void * buffer,block_t block_number) {
 	iv[3]=((unsigned long)block_number)>>24;
 	
 	memset(iv+4,0,12);
-	
-/*
-	printf("IV for block %llu:",(unsigned long long)block_number);
-	for (int i=0;i<16;++i) {
-		printf(" %02x",iv[i]);
-	}
-	putchar('\n');
-*/
 	
 	return;
 }

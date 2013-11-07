@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #include "bdev.h"
 #include "common.h"
 
@@ -94,6 +98,7 @@ int main(int argc,char * argv[]) {
 				,driver_name
 				,p
 			);
+			free(name_copy);
 			exit(2);
 		}
 		free(name_copy);
@@ -152,10 +157,10 @@ int main(int argc,char * argv[]) {
 	
 	{ // First check the last part of the range
 		block_t r;
-		if (CONST_64!=(r=bdev_read(bdev1,pos1+num_blocks-CONST_64,CONST_64,buffer1))) {
+		if (CONST_64!=(r=bdev_read(bdev1,pos1+num_blocks-CONST_64,CONST_64,buffer1,"main1"))) {
 			eprintf("bdev1->read failed (r=%llu)\n",(unsigned long long)r);
 		}
-		if (CONST_64!=(r=bdev_read(bdev2,pos2+num_blocks-CONST_64,CONST_64,buffer2))) {
+		if (CONST_64!=(r=bdev_read(bdev2,pos2+num_blocks-CONST_64,CONST_64,buffer2,"main2"))) {
 			eprintf("bdev2->read failed (r=%llu)\n",(unsigned long long)r);
 		}
 		if (memcmp(buffer1,buffer2,CONST_64*512)) {
@@ -176,8 +181,8 @@ int main(int argc,char * argv[]) {
 	while (num) {
 		block_t n=CONST_64;
 		if (unlikely(n>num)) n=num;
-		bdev_read(bdev1,pos1,n,buffer1);
-		bdev_read(bdev2,pos2,n,buffer2);
+		bdev_read(bdev1,pos1,n,buffer1,"main3");
+		bdev_read(bdev2,pos2,n,buffer2,"main4");
 		if (memcmp(buffer1,buffer2,n*512)) {
 			eprintf(
 				"Data mismatch @ bdev1:%llu vs bdev2:%llu\n"

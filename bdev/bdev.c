@@ -1,3 +1,7 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
 #include "bdev.h"
 
 #include "common.h"
@@ -76,7 +80,7 @@ struct bdev * bdev_register_bdev(
 //	bdev_read_function read,
 //	bdev_write_function write,
 	bdev_destroy_function destroy,
-	void * private
+	struct bdev_private * private
 ) {
 	ignore(bdev_driver);
 	
@@ -170,7 +174,7 @@ unsigned bdev_get_block_size(const struct bdev * bdev) {
 	return bdev->block_size;
 }
 
-void * bdev_get_private(const struct bdev * bdev) {
+struct bdev_private * bdev_get_private(const struct bdev * bdev) {
 	return bdev->private;
 }
 

@@ -1,6 +1,8 @@
 /*
- * Copyright 2007 Bodo Thiesen
- *
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
+/*
  * Shamelessly stolen from the linux kernel sources (version 2.6.19)
  */
 
@@ -23,7 +25,6 @@
  */
 
 #include "raid6.h"
-// #include "raid6-linux.h"
 #include "raid6x86.h"
 
 #include <assert.h>
@@ -35,16 +36,6 @@ const struct raid6_mmx_constants {
 } raid6_mmx_constants = {
 	0x1d1d1d1d1d1d1d1dULL,
 };
-
-#if 0
-static int raid6_have_mmx(void)
-{
-	return 1;
-	/* User space test code */
-//	u32 features = cpuid_features();
-//	return ( (features & (1<<23)) == (1<<23) );
-}
-#endif
 
 /*
  * Unrolled-by-2 MMX implementation

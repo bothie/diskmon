@@ -1,6 +1,10 @@
 bdev/bdev_autogen.[ch]
 
 Makefile.stderr
+Makefile.conf
+
+version.c
+version.h
 
 *.c.d
 

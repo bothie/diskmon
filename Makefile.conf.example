@@ -1,0 +1,29 @@
+#
+# Shall support for threading be compiled in?
+#
+THREADS = false
+
+#
+# Shall support for threading be implemented using btclone?
+# (default is to use pthread)
+# BTCLONE supports seems to be broken for some reason.
+#
+BTCLONE = false
+
+#
+# Don't change below this line
+#
+
+ifeq ($(THREADS),true)
+CFLAGS += "-DTHREADS"
+
+ifeq ($(BTCLONE),true)
+CFLAGS += "-DBTCLONE"
+else
+BTCLONE =
+endif # ifeq ($(BTCLONE),true)
+
+else
+THREADS =
+BTCLONE =
+endif # ifeq ($(THREADS),true)

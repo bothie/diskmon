@@ -30,7 +30,7 @@
 /*
  * Indirect public interface
  */
-static block_t cache_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t cache_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason);
 static block_t cache_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 
 static bool cache_destroy(struct bdev * bdev);
@@ -373,6 +373,7 @@ static bool access_one_block(
 	struct bdev_private * private,
 	block_t block,
 	data_ptr_t data,
+	const char * reason,
 	bool shall_write
 ) {
 	if (block >= bdev_get_size(bdev)) {
@@ -395,7 +396,7 @@ static bool access_one_block(
 	}
 	
 	if (!private->cache_files_directory) {
-		return bdev_read(private->backing_storage, block, 1, data.wptr) == 1;
+		return bdev_read(private->backing_storage, block, 1, data.wptr, reason) == 1;
 	}
 	
 	unsigned bs = bdev_get_block_size(bdev);
@@ -415,7 +416,7 @@ static bool access_one_block(
 	struct block_lookup_entry * ble = set_find(private->block_lookup_set, &ble_search);
 	bool kill_ble = false;
 	if (!ble) {
-		block_t r = bdev_read(private->backing_storage, block, 1, data.wptr);
+		block_t r = bdev_read(private->backing_storage, block, 1, data.wptr, reason);
 		
 		if (r != 1) {
 			goto out;
@@ -483,7 +484,7 @@ static bool access_one_block(
 			}
 		} else {
 direct_read: ;
-			block_t r = bdev_read(private->backing_storage, block, 1, data.wptr);
+			block_t r = bdev_read(private->backing_storage, block, 1, data.wptr, reason);
 			
 			if (r != 1) {
 				goto out;
@@ -555,6 +556,7 @@ out:
 static block_t access_blocks(
 	struct bdev * bdev,
 	block_t first, block_t num, data_ptr_t data_ptr,
+	const char * reason,
 	bool shall_write
 ) {
 	BDEV_PRIVATE(struct bdev_private);
@@ -564,7 +566,7 @@ static block_t access_blocks(
 	block_t retval;
 	
 	for (retval = 0; retval < num; ++retval) {
-		if (unlikely(!access_one_block(bdev, private, first, data_ptr, shall_write))) {
+		if (unlikely(!access_one_block(bdev, private, first, data_ptr, reason, shall_write))) {
 			if (unlikely(retval)) {
 				return retval;
 			}
@@ -581,14 +583,14 @@ static block_t access_blocks(
 	return retval;
 }
 
-static block_t cache_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
+static block_t cache_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason) {
 	data_ptr_t data_ptr;
 #ifdef DEBUG_DATA_PTR_T
 	data_ptr.rptr = NULL;
 #endif // #ifdef DEBUG_DATA_PTR_T
 	data_ptr.wptr = data;
 	
-	return access_blocks(bdev, first, num, data_ptr, false);
+	return access_blocks(bdev, first, num, data_ptr, reason, false);
 }
 
 static block_t cache_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
@@ -598,5 +600,5 @@ static block_t cache_write(struct bdev * bdev, block_t first, block_t num, const
 #endif // #ifdef DEBUG_DATA_PTR_T
 	data_ptr.rptr = data;
 	
-	return access_blocks(bdev, first, num, data_ptr, true);
+	return access_blocks(bdev, first, num, data_ptr, NULL, true);
 }

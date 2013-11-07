@@ -1,44 +1,48 @@
 ###############################################################################
 #
-# The bothie-utils are Copyright (C) 2001-2007 by Bodo Thiesen <bothie@gmx.de>
-#
-#    This program is free software; you can redistribute it and/or modify
-#    it under the terms of the GNU General Public License as published by
-#    the Free Software Foundation; either version 2 of the License, or
-#    (at your option) any later version.
-#
-#    This program is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU General Public License for more details.
-#
-#    You should have received a copy of the GNU General Public License
-#    along with this program; if not, write to the Free Software
-#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+# diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
 #
 ###############################################################################
 
-#package        = diskmon
-#copyrightyears = ????-2007
-#mainauthor     = Bodo Thiesen <bothie@gmx.de>
+package        = diskmon
+copyrightyears = 2007-2013
+mainauthor     = Bodo Thiesen <bothie@gmx.de>
 
 MAKEFILE = Makefile
 TOPDIR   = ../..
 THISDIR  = fs/ext2
 
+include $(TOPDIR)/Makefile.conf
+
 SRCS = \
+	bitmap.c \
+	com_cache.c \
+	endian.c \
 	ext2.c \
+	fsck.c \
+	isc.c \
+	pc.c \
+	threads.c \
 
 SOTARGET = ext2.so
 # SOFLAGS += -L../../bdev -lbdev
 # -L.. -lfs
 
-SOFLAGS += -lz -lpthread
+SOFLAGS += \
+	-lz \
 
-CPPFLAGS-ext2.o += -I.. -I../.. -I../../bdev
-CPPFLAGS-ext2.s += -I.. -I../.. -I../../bdev
-CPPFLAGS-ext2.o += -DHAVE_LINUX_CLONE
-CPPFLAGS-ext2.s += -DHAVE_LINUX_CLONE
+CPPFLAGS += -I.. -I../.. -I../../bdev
+CPPFLAGS += -DHAVE_VALGRIND
+CPPFLAGS += -D_GNU_SOURCE
+# CPPFLAGS += -D_FORTIFY_SOURCE=0
+CPPFLAGS += -DNEED_LONG_LONG
+CPPFLAGS += -D__athlon__
+
+CFLAGS += -fno-inline
+CFLAGS += -fno-inline-small-functions
+CFLAGS += -fno-inline-functions
+CFLAGS += -fno-inline-functions-called-once
+CFLAGS += -fno-early-inlining
 
 # DONTOPTIMIZE=true
 
@@ -53,6 +57,7 @@ CPPFLAGS += \
 LDFLAGS += \
 	-LBtLinuxLibrary -lBtLinuxLibrary \
 	-L$(TOPDIR)/btlib -lbt \
+	-lrt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

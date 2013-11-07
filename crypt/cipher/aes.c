@@ -1,11 +1,20 @@
 /*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ * 
+ * The following source file is distributed under both, a BSD-like license 
+ * AND the GNU General Public License. It is used under the terms of the 
+ * BSD-like license in this project, so the GNU General Public License 
+ * doesn't apply, especially it doesn't apply to the rest of this project.
+ */
+
+/*
  * Rijndael (AES) Cipher Algorithm
- *
+ * 
  * Copyright (C) 2007 Bodo Thiesen
- *
+ * 
  * Shamelessly stolen from the Linux Kernel Sources. The rest of this comment 
  * was left unchanged.
- *
+ * 
  * Based on Brian Gladman's code.
  *
  * Linux developers:
@@ -53,36 +62,14 @@
  * ---------------------------------------------------------------------------
  */
 
-/*
- * Some changes from the Gladman version:
- * s/RIJNDAEL(e_key)/E_KEY/g
- * s/RIJNDAEL(d_key)/D_KEY/g
- */
-
 #include "crypt.h"
 
 #include "common.h"
 
+#include <btendian.h>
 #include <btstr.h>
-char * mmemcpy(const char *b,size_t bs); // Ist noch nicht im neuesten Release enthalten
 #include <bttypes.h>
-#include <byteswap.h>
-#include <endian.h>
-#include <errno.h>
-#include <string.h>
 
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-#define host2le32(x) (x)
-#define le2host32(x) (x)
-#elif __BYTE_ORDER == __BIG_ENDIAN
-#define host2le32(x) bswap_32(x)
-#define le2host32(x) bswap_32(x)
-#else
-#error PDP? You'r kidding, aren't you?
-#endif
-
-// #define rol32(value,bits) ((value<<bits) | (value>>(32-bits)))
-// #define ror32(value,bits) ((value>>bits) | (value<<(32-bits)))
 /**
  * rol32 - rotate a 32-bit value left
  * @word: value to rotate
@@ -150,9 +137,6 @@ CRYPT_FINI {
 	}
 }
 
-/*
- * #define byteof(x, nr) ((unsigned char)((x) >> (nr*8))) 
- */
 static inline u8 byteof(const u32 x,const unsigned n) {
 	return x>>(n<<3);
 }
@@ -160,10 +144,10 @@ static inline u8 byteof(const u32 x,const unsigned n) {
 #define E_KEY (&ctx->buf[0])
 #define D_KEY (&ctx->buf[60])
 
-static u8 pow_tab[256]; // __initdata;
-static u8 log_tab[256]; // __initdata;
-static u8 sbx_tab[256]; // __initdata;
-static u8 isb_tab[256]; // __initdata;
+static u8 pow_tab[256];
+static u8 log_tab[256];
+static u8 sbx_tab[256];
+static u8 isb_tab[256];
 static u32 rco_tab[10];
 static u32 ft_tab[4][256];
 static u32 it_tab[4][256];
@@ -399,7 +383,7 @@ struct crypt_alg_ctx * aes_makectx(
 	retval->key_length=((struct aes_key *)crypt_alg_key)->key_length;
 	
 	for (u32 i=retval->key_length/4;--i;) {
-		E_KEY[i]=key[i];
+		E_KEY[i]=le2host32(key[i]);
 	}
 	
 	switch (retval->key_length) {

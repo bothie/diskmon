@@ -1,3 +1,9 @@
+/*
+ * diskmon is Copyright (C) 2007-2013 by Bodo Thiesen <bothie@gmx.de>
+ */
+
+#define _XOPEN_SOURCE 500
+#define _BSD_SOURCE 1
 #define _GNU_SOURCE
 
 #include "common.h"
@@ -12,6 +18,7 @@
 #include <mprintf.h>
 #include <parseutil.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -34,11 +41,13 @@ char parse_c_string(
 // #include <linux/fs.h>
 #include <sys/mount.h>
 
-#define DRIVER_NAME "looperr"
+/*
+#ifndef BLKSSZGET
+#define BLKSSZGET  _IO(0x12,104)
+#endif // #ifndef BLKSSZGET
+*/
 
-static inline int gettid() {
-	return syscall(SYS_gettid);
-}
+#define DRIVER_NAME "looperr"
 
 /*
  * Public interface
@@ -49,7 +58,7 @@ static inline int gettid() {
 /*
  * Indirect public interface
  */
-static block_t looperr_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data);
+static block_t looperr_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason);
 static block_t looperr_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data);
 
 static bool looperr_destroy(struct bdev * bdev);
@@ -76,21 +85,22 @@ BDEV_FINI {
  * Implementation - everything non-public (except for init of course).
  */
 
-struct looperr_dev {
-	int fd;
+struct bdev_private {
 	int img,map;
 	struct btlock_lock * lock;
-	struct bdev * bdev;
+//	struct bdev * bdev;
+	int log;
+	unsigned long chunk_size;
 };
 
-static bool looperr_destroy_private(struct looperr_dev * private);
+static bool looperr_destroy_private(struct bdev_private * private);
 
 // <filename>
 //
 // name will be reowned by init, args will be freed by the caller.
 // static 
 static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args) {
-	struct looperr_dev * private=zmalloc(sizeof(*private));
+	struct bdev_private * private=zmalloc(sizeof(*private));
 	if (!private) {
 		ERRORF("looperr_init: malloc: %s",strerror(errno));
 		goto err;
@@ -102,10 +112,10 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 	}
 	private->img=-1;
 	private->map=-1;
-	private->fd=open(args,O_RDONLY);
-//	private->fd=open(args,O_RDWR);
+	private->log=-1;
+	private->chunk_size=1;
 	unsigned line=-1;
-	if (private->fd<0) {
+	{
 		char * map_filename;
 		char * img_filename;
 		
@@ -114,26 +124,40 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		
 		line=0;
 		c=parse_c_string(&p,true,&map_filename,NULL);
-		if (c!=' ') { line=__LINE__; goto err_msg_open; }
+		
 		if (!parse_skip(&p,' ')) { line=__LINE__; goto err_msg_open; }
+		
 		c=parse_c_string(&p,true,&img_filename,NULL);
-		if (c) { line=__LINE__; goto err_msg_open; }
 		
-		/*
-		if (!parse_skip(&p,'"')) { line=__LINE__; goto err_msg_open; }
-		
-		c=parse_c_string(&p,false,&map_filename,NULL);
-		if (c!='"') { line=__LINE__; goto err_msg_open; }
-		
-		if (!parse_skip(&p,'"')) { line=__LINE__; goto err_msg_open; }
-		if (!parse_skip(&p,' ')) { line=__LINE__; goto err_msg_open; }
-		if (!parse_skip(&p,'"')) { line=__LINE__; goto err_msg_open; }
-		
-		c=parse_c_string(&p,false,&img_filename,NULL);
-		if (c!='"') { line=__LINE__; goto err_msg_open; }
-		
-		if (!parse_skip(&p,'"')) { line=__LINE__; goto err_msg_open; }
-		*/
+		while (parse_skip(&p, ' ')) {
+			if (parse_skip_string(&p,"--logfile ")) {
+				char * logfilename;
+				c=parse_c_string(&p,true,&logfilename,NULL);
+				if (!logfilename) {
+					ERRORF("looperr_init: parse_c_string couldn't parse logfilename: %s",strerror(errno));
+					goto err;
+				}
+				private->log=open(logfilename,O_WRONLY|O_CREAT|O_TRUNC,0666);
+				if (private->log<0) {
+					ERRORF("looperr_init: Couldn't open file \"%s\": %s",logfilename,strerror(errno));
+					free(logfilename);
+					goto err;
+				}
+				free(logfilename);
+				continue;
+			}
+			if (parse_skip_string(&p,"--chunk-size ")) {
+				c=parse_unsigned_long(&p,&private->chunk_size);
+				if (!c && pwerrno) {
+					ERRORF(
+						"looperr_init: parse_unsigned_long couldn't parse chunk size: %s"
+						, pwerror(pwerrno)
+					);
+					goto err;
+				}
+				continue;
+			}
+		}
 		
 		if (*p) { line=__LINE__; goto err_msg_open; }
 		
@@ -155,8 +179,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		bool ioctlok;
 		{
 			size_t bs;
-			int fd=(private->fd>=0)?private->fd:private->img;
-			ioctlok=!ioctl(fd,BLKSSZGET,&bs);
+			ioctlok=!ioctl(private->img,BLKSSZGET,&bs);
 			block_size=bs;
 		}
 		if (!ioctlok) {
@@ -169,8 +192,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 			}
 		}
 	}
-	int fd=(private->fd>=0)?private->fd:private->img;
-	block_t size=lseek(fd,0,SEEK_END);
+	block_t size=lseek(private->img,0,SEEK_END);
 	if (size%block_size) {
 		ERRORF(
 			"looperr_init: Size of file %s is %llu which is not a multiple of %u bytes (block size).\n"
@@ -181,17 +203,31 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		goto err;
 	}
 	size/=block_size;
-	if (private->fd<0) {
+	{
 		block_t bmp_size=lseek(private->map,0,SEEK_END);
 		if (bmp_size!=(size+7)/8) {
-			ERROR(
-				"looperr_init: Size of image file and bitmap file don't correspondent.\n"
+			WARNING(
+				"looperr_init: Size of image file and bitmap file don't correspond."
 			);
-			goto err;
+			WARNINGF(
+				"looperr_init: Size of image file is %llu blocks"
+				, (long long unsigned)size
+			);
+			WARNINGF(
+				"looperr_init: Size of bitmap file is %llu bits"
+				, (long long unsigned)(bmp_size * 8)
+			);
+			if (bmp_size * 8 < size) {
+				size = bmp_size * 8;
+			}
+			WARNINGF(
+				"looperr_init: Setting looperr block device to %llu blocks"
+				, (long long unsigned)size
+			);
 		}
 	}
 	
-	private->bdev=bdev_register_bdev(
+	struct bdev * bdev=bdev_register_bdev(
 		bdev_driver,
 		name,
 		size,
@@ -199,11 +235,11 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 		looperr_destroy,
 		private
 	);
-	bdev_set_read_function(private->bdev,looperr_read);
-	bdev_set_write_function(private->bdev,looperr_write);
+	bdev_set_read_function(bdev,looperr_read);
+	bdev_set_write_function(bdev,looperr_write);
 	
-	if (likely(private->bdev)) {
-		return private->bdev;
+	if (likely(bdev)) {
+		return bdev;
 	}
 
 	goto err;
@@ -219,34 +255,34 @@ err:
 	return NULL;
 }
 
-bool looperr_destroy_private(struct looperr_dev * private) {
+static bool looperr_destroy_private(struct bdev_private * private) {
 	btlock_lock_free(private->lock);
-	if (private->fd>=0) {
-		close(private->fd);
-	} else {
-		if (private->img>=0) close(private->img);
-		if (private->map>=0) close(private->map);
-	}
+	if (private->img>=0) close(private->img);
+	if (private->map>=0) close(private->map);
+	if (private->log>=0) close(private->log);
 	free(private);
 	return true;
 }
 
-bool looperr_destroy(struct bdev * bdev) {
-	BDEV_PRIVATE(struct looperr_dev);
-	return looperr_destroy_private(private);
+static bool looperr_destroy(struct bdev * bdev) {
+	return looperr_destroy_private(bdev_get_private(bdev));
 }
 
 static bool looperr_access_one_block(
-	struct looperr_dev * private,
-	block_t block,unsigned char * data,
-	bool shall_write
+	struct bdev * bdev
+	, block_t block
+	, unsigned char * data
+	, bool shall_write
+	, const char * reason
 ) {
-	unsigned bs=bdev_get_block_size(private->bdev);
+	struct bdev_private * private = bdev_get_private(bdev);
+	
+	unsigned bs=bdev_get_block_size(bdev);
 	
 //	eprintf("looperr_access_one_block: Trying to %s block %llx\n",shall_write?"write":"read",(unsigned long long)block);
 	
-	if (block>=bdev_get_size(private->bdev)) {
-		WARNINGF("Attempt to access %s beyond end of device.",bdev_get_name(private->bdev));
+	if (block >= bdev_get_size(bdev)) {
+		WARNINGF("Attempt to access %s beyond end of device.", bdev_get_name(bdev));
 		errno=EINVAL;
 		return false;
 	}
@@ -262,15 +298,11 @@ static bool looperr_access_one_block(
 	bool retval=false;
 	
 	unsigned char new_m,m;
-//	eprintf("lseek(map,%llx,SEEK_SET)\n",(unsigned long long)(block/8));
-	if (block/8!=lseek(private->map,block/8,SEEK_SET)) {
-		ERRORF("looperr: Couldn't seek to the needed location in the bitmap file: %s",strerror(errno));
+	if (1 != pread(private->map, &m, 1, block / 8)) {
+		ERRORF("looperr: Couldn't pread one byte from the bitmap file: %s", strerror(errno));
 		goto out;
 	}
-	if (1!=read(private->map,&m,1)) {
-		ERRORF("looperr: Couldn't read one byte from the bitmap file: %s",strerror(errno));
-		goto out;
-	}
+	
 //	eprintf("read -> m=%02x checking for bit %02x being set\n",(unsigned)m,(unsigned)(1<<(block%8)));
 	if (shall_write) {
 		new_m=m|(1<<(block%8));
@@ -283,21 +315,31 @@ static bool looperr_access_one_block(
 				,(unsigned long long)block
 			);
 */
+			if (private->log >= 0) {
+				dprintf(private->log,
+					"%llu %s\n"
+					, (unsigned long long)block / private->chunk_size
+					, reason
+				);
+			}
+			errno = EIO;
 			goto out;
 		}
 	}
 	
-	if (block*bs!=lseek(private->img,block*bs,SEEK_SET)) {
-		ERRORF("looperr: Couldn't seek to the needed location in the image file: %s",strerror(errno));
-		goto out;
-	}
-	errno=0;
-	off_t r=shall_write?write(private->img,data,bs):read(private->img,data,bs);
-	if (r!=bs) {
-		if (r<0) {
-			ERRORF("looperr: Couldn't read from image file: %s",strerror(errno));
+	off_t rw = shall_write ? pwrite(private->img, data, bs, block * bs) : pread(private->img, data, bs, block * bs);
+	if (rw != bs) {
+		if (rw<0) {
+			ERRORF("looperr: Couldn't p%s image file: %s"
+				, shall_write ? "write to" : "read from"
+				, strerror(errno)
+			);
 		} else {
-			ERRORF("looperr: Oops: Couldn't read a full block from image file (got only %llu ",(unsigned long long)r);
+			ERRORF("looperr: Oops: Couldn't p%s a full block %s the image file (done only %llu "
+				, shall_write ? "write" : "read"
+				, shall_write ? "to" : "from"
+				, (unsigned long long)rw
+			);
 			ERROR("looperr: Oops: bytes). Did someone mess with the image file while we were ");
 			ERROR("looperr: Oops: working on it?");
 			errno=EIO;
@@ -316,13 +358,8 @@ static bool looperr_access_one_block(
 			goto out;
 		}
 		if (new_m!=m) {
-			if (block/8!=lseek(private->map,-1,SEEK_CUR)) {
-				ERROR("looperr: Oops: Couldn't seek back to a location in the bitmap file which we ");
-				ERRORF("looperr: Oops: previously could successfully seek to: %s",strerror(errno));
-				goto out;
-			}
-			if (1!=write(private->map,&m,1)) {
-				ERROR("looperr: Oops: Write to image file succeeded but bitmap setting on bitmap file ");
+			if (1 != pwrite(private->map, &m, 1, block / 8)) {
+				ERROR("looperr: Oops: Write to image file succeeded but pwrite on the bitmap file ");
 				ERRORF("looperr: Oops: failed: %s",strerror(errno));
 				goto out;
 			}
@@ -340,19 +377,19 @@ out:
 }
 
 static block_t looperr_access(
-	struct looperr_dev * private,
-	block_t first,block_t num,unsigned char * data,
-	bool shall_write
+	struct bdev * bdev
+	, block_t first
+	, block_t num
+	, unsigned char * data
+	, bool shall_write
+	, const char * reason
 ) {
-	unsigned bs=bdev_get_block_size(private->bdev);
+	unsigned bs = bdev_get_block_size(bdev);
 	block_t retval;
 	
 	for (retval=0;retval<num;++retval) {
-		if (unlikely(!looperr_access_one_block(private,first,data,shall_write))) {
-			if (unlikely(retval)) {
-				return retval;
-			}
-			return -1;
+		if (unlikely(!looperr_access_one_block(bdev, first, data, shall_write, reason))) {
+			return retval;
 		}
 		++first;
 		data+=bs;
@@ -360,19 +397,15 @@ static block_t looperr_access(
 	return retval;
 }
 
-static block_t looperr_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data) {
-	BDEV_PRIVATE(struct looperr_dev);
-	
-	return looperr_access(private, first, num, data, false);
+static block_t looperr_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason) {
+	return looperr_access(bdev, first, num, data, false, reason);
 }
 
 static block_t looperr_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
-	BDEV_PRIVATE(struct looperr_dev);
-	
 	/*
 	 * Sadly we have to cast away that const qualifiers. But if we don't 
 	 * do it here, we'd have to do it in looperr_access or 
 	 * looperr_access_one_block anyways, so just do it here.
 	 */
-	return looperr_access(private, first, num, (unsigned char *)data, true);
+	return looperr_access(bdev, first, num, (unsigned char *)data, true, "TODO: reason");
 }
