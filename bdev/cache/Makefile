@@ -21,10 +21,10 @@ LIBTARGET = cache
 SOTARGET = cache.so
 SOFLAGS += -L.. -lbdev
 
-CPPFLAGS-cache.o += -I.. -I../..
+CPPFLAGS-cache.o += -I.. -I../.. -I../../btlib
 
 CPPFLAGS += 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L../../btlib -lbt
 
 include $(shell btmakefile --path)/Makefile.Include
 
