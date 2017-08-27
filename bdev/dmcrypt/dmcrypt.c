@@ -233,10 +233,8 @@ struct bdev * dmcrypt_init(struct bdev_driver * bdev_driver,char * name,const ch
 	
 #ifdef DEBUGGING
 #define KEY_FILE "chkraid.key"
-#warning +DEBUGGING
 #else
 #define KEY_FILE "/ramfs/aesraid.key"
-#warning -DEBUGGING
 #endif
 	int fd=open(KEY_FILE,O_RDONLY);
 	if (fd<0) {
