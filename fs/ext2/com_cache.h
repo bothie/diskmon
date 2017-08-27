@@ -30,15 +30,17 @@ struct com_cache {
 	struct com_cache_entry * * ccgroup;
 	struct com_cache_entry * head;
 	struct com_cache_entry * tail;
+#if USE_COMC_THREAD_TO_READ
 	struct com_cache_entry * read_head;
+#endif // #if USE_COMC_THREAD_TO_READ
 	struct com_cache_entry * read_tail;
 	// 2^32*4/65536=256KB per cache entry
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 	struct {
 		u8 * ptr;
 		size_t len;
 	} * compr;
-#endif // #ifdef COMC_IN_MEMORY, else
+#endif // #if COMC_IN_MEMORY
 	size_t cbuflen;
 	u8 * cbuffer;
 };
@@ -52,7 +54,7 @@ void com_cache_cleanup(struct scan_context * sc);
 
 bool com_cache_work(struct scan_context * sc);
 
-#ifdef THREADS
+#if ALLOW_COM_CACHE_THREAD
 
 #include "threads.h"
 
@@ -60,6 +62,6 @@ void shutdown_com_cache_thread(struct scan_context * sc);
 
 THREAD_RETURN_TYPE com_cache_thread(THREAD_ARGUMENT_TYPE arg);
 
-#endif // #ifdef THREADS
+#endif // #if ALLOW_COM_CACHE_THREAD
 
 #endif // #ifndef COM_CACHE_H

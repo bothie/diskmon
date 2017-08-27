@@ -3,13 +3,9 @@
 
 #include "conf.h"
 
-#ifdef THREADS
+#if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 
 extern struct btlock_lock * ind_lock;
-
-#endif // #ifdef THREADS
-
-#if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 
 void try_clone();
 

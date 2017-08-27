@@ -13,23 +13,23 @@
 #include <string.h>
 #include <zlib.h>
 
-#ifdef THREADS
+#if ALLOW_COM_CACHE_THREAD
 
-#define CL_LOCK(sc) if (sc->threads) do { \
+#define CL_LOCK(sc) if (sc->allow_com_cache_thread) do { \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Locking cluster allocation map\n",__LINE__,gettid()); \
 	} \
 	btlock_lock(sc->cam_lock); \
 } while (0)
 
-#define CL_UNLOCK(sc) if (sc->threads) do { \
+#define CL_UNLOCK(sc) if (sc->allow_com_cache_thread) do { \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Unlocking cluster allocation map\n",__LINE__,gettid()); \
 	} \
 	btlock_unlock(sc->cam_lock); \
 } while (0)
 
-#define CCT_WAIT() if (sc->threads) do { \
+#define CCT_WAIT() if (sc->allow_com_cache_thread) do { \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: cc thread - going to sleep\n",__LINE__,gettid()); \
 	} \
@@ -39,28 +39,28 @@
 	} \
 } while (0)
 
-#define CCT_WAKE() if (sc->threads) do { \
+#define CCT_WAKE() if (sc->allow_com_cache_thread) do { \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Waking up cc thread\n",__LINE__,gettid()); \
 	} \
 	btlock_wake(sc->com_cache_thread_lock); \
 } while (0)
 
-#define CC_LOCK(x) if (sc->threads) do { \
+#define CC_LOCK(x) if (sc->allow_com_cache_thread) do { \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Locking com_cache directory\n",__LINE__,gettid()); \
 	} \
 	btlock_lock((x).debug_lock); \
 } while (0)
 
-#define CC_UNLOCK(x) if (sc->threads) do { \
+#define CC_UNLOCK(x) if (sc->allow_com_cache_thread) do { \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Unlocking com_cache directory\n",__LINE__,gettid()); \
 	} \
 	btlock_unlock((x).debug_lock); \
 } while (0)
 
-#define CCE_LOCK(y) if (sc->threads) do { \
+#define CCE_LOCK(y) if (sc->allow_com_cache_thread) do { \
 	struct com_cache_entry * x=(y); \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Locking com_cache[%u]\n",__LINE__,gettid(),(unsigned)x->index); \
@@ -68,7 +68,7 @@
 	btlock_lock(x->debug_lock); \
 } while (0)
 
-#define CCE_UNLOCK(y) if (sc->threads) do { \
+#define CCE_UNLOCK(y) if (sc->allow_com_cache_thread) do { \
 	struct com_cache_entry * x=(y); \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Unlocking com_cache[%u]\n",__LINE__,gettid(),(unsigned)x->index); \
@@ -76,7 +76,7 @@
 	btlock_unlock(x->debug_lock); \
 } while (0)
 
-#define CCE_LOCK_FREE(y) if (sc->threads) do { \
+#define CCE_LOCK_FREE(y) if (sc->allow_com_cache_thread) do { \
 	struct com_cache_entry * x=(y); \
 	/* \
 	if (CC_DEBUG_LOCKS) { \
@@ -86,7 +86,7 @@
 	btlock_lock_free(x->debug_lock); \
 } while (0)
 
-#define CCE_LOCK_MK(y) if (sc->threads) do { \
+#define CCE_LOCK_MK(y) if (sc->allow_com_cache_thread) do { \
 	struct com_cache_entry * x=(y); \
 	if (CC_DEBUG_LOCKS) { \
 		eprintf("%4i in thread %5i: Allocating lock for com_cache[%u]\n",__LINE__,gettid(),(unsigned)x->index); \
@@ -105,7 +105,7 @@
 	*/ \
 } while (0)
 
-#else // #ifdef THREADS
+#else // #if ALLOW_COM_CACHE_THREAD
 
 #define CL_LOCK(sc) do {} while (0)
 #define CL_UNLOCK(sc) do {} while (0)
@@ -118,7 +118,7 @@
 #define CCE_LOCK_FREE(y) do {} while (0)
 #define CCE_LOCK_MK(y) do {} while (0)
 
-#endif // #ifdef THREADS, else
+#endif // #if ALLOW_COM_CACHE_THREAD, else
 
 volatile bool exit_request_com_cache_thread=false;
 
@@ -126,8 +126,8 @@ volatile bool exit_request_com_cache_thread=false;
  * CCE_LOCK(walk) must be held
  */
 void comc_move_front(struct scan_context * sc, struct com_cache_entry * walk, bool new) {
-	if (!sc->threads) {
-		exit_request_com_cache_thread=true;
+	if (!sc->allow_com_cache_thread) {
+		exit_request_com_cache_thread = true;
 		com_cache_work(sc);
 	}
 	
@@ -167,9 +167,9 @@ void comc_get(struct scan_context * sc, struct com_cache_entry * walk) {
 	
 	// BEGIN READING
 	walk->entry=malloc(8*sc->comc.clusters_per_entry);
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 	if (!sc->comc.compr[walk->index].ptr) {
-#else // #ifdef COMC_IN_MEMORY
+#else // #if COMC_IN_MEMORY
 	char * tmp;
 	int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_RDONLY);
 	if (fd<0) {
@@ -178,15 +178,15 @@ void comc_get(struct scan_context * sc, struct com_cache_entry * walk) {
 			exit(2);
 		}
 		free(tmp);
-#endif // #ifdef COMC_IN_MEMORY, else
+#endif // #if COMC_IN_MEMORY, else
 		memset(walk->entry,0,8*sc->comc.clusters_per_entry);
 		// eprintf("Init %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
 	} else {
 		// eprintf("Read %5i (num_in_memory=%u)\n",walk->index,sc->comc.num_in_memory);
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 		Bytef * cbuffer=(Bytef *)sc->comc.compr[walk->index].ptr;
 		uLongf  dbuflen=sc->comc.compr[walk->index].len;
-#else // #ifdef COMC_IN_MEMORY
+#else // #if COMC_IN_MEMORY
 		if (CC_DEBUG_LOCKS) eprintf("%4i in thread %5i: Reading data by using fd %i\n",__LINE__,gettid(),fd);
 		uLongf dbuflen=read(fd,cbuffer,cbuflen);
 		if (close(fd)) {
@@ -194,7 +194,7 @@ void comc_get(struct scan_context * sc, struct com_cache_entry * walk) {
 			exit(2);
 		}
 		free(tmp);
-#endif // #ifdef COMC_IN_MEMORY, else
+#endif // #if COMC_IN_MEMORY, else
 		uLongf x=8*sc->comc.clusters_per_entry;
 		if (Z_OK!=uncompress((Bytef*)walk->entry,&x,(Bytef*)cbuffer,dbuflen)) {
 			eprintf("cluster-owner-map-cache-thread: OOPS: uncompress failed\n");
@@ -216,6 +216,7 @@ bool com_cache_work(struct scan_context * sc) {
 	bool nothing_done = true;
 	
 	CC_LOCK(sc->comc);
+#if USE_COMC_THREAD_TO_READ
 	if (sc->comc.read_head) {
 		nothing_done = false;
 		
@@ -233,6 +234,7 @@ bool com_cache_work(struct scan_context * sc) {
 		
 		CC_LOCK(sc->comc);
 	}
+#endif // #if USE_COMC_THREAD_TO_READ
 	if (nothing_done || likely(sc->comc.num_in_memory>=MAX_COMC_IN_MEMORY)) {
 		if (likely(sc->comc.num_in_memory>MAX_COMC_DIRTY)) {
 			size_t num=sc->comc.num_in_memory-MAX_COMC_DIRTY;
@@ -254,10 +256,10 @@ bool com_cache_work(struct scan_context * sc) {
 						eprintf("cluster-owner-map-cache-thread: OOPS: compress2 failed: %s\n", zError(z_rv));
 						exit(2);
 					}
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 					free(sc->comc.compr[walk->index].ptr);
 					memcpy(sc->comc.compr[walk->index].ptr=malloc(dbuflen),sc->comc.cbuffer,sc->comc.compr[walk->index].len=dbuflen);
-#else // #ifdef COMC_IN_MEMORY
+#else // #if COMC_IN_MEMORY
 					char * tmp;
 					int fd=open(tmp=mprintf("/ramfs/comc/%04x",(unsigned)walk->index),O_CREAT|O_TRUNC|O_WRONLY,0666);
 					if (fd<0) {
@@ -275,7 +277,7 @@ bool com_cache_work(struct scan_context * sc) {
 						exit(2);
 					}
 					free(tmp);
-#endif // #ifdef COMC_IN_MEMORY, else
+#endif // #if COMC_IN_MEMORY, else
 					walk->dirty=false;
 					// END WRITING
 					
@@ -320,7 +322,7 @@ bool com_cache_work(struct scan_context * sc) {
 	return !nothing_done;
 }
 
-#ifdef THREADS
+#if ALLOW_COM_CACHE_THREAD
 THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 	struct scan_context * sc=(struct scan_context *)arg;
 	
@@ -339,7 +341,7 @@ THREAD_RETURN_TYPE com_cache_thread(void * arg) {
 	
 	THREAD_RETURN();
 }
-#endif // #ifdef THREADS
+#endif // #if ALLOW_COM_CACHE_THREAD
 
 struct com_cache_entry * get_com_cache_entry(struct scan_context * sc, size_t ccg, u64 cluster) {
 /*
@@ -397,7 +399,7 @@ struct com_cache_entry * get_com_cache_entry(struct scan_context * sc, size_t cc
 		// A little bit strange. We lock CCE here and don't unlock it again. That 
 		// will be done by the reader thread. This allows us to wait for it by a 
 		// simple double locking.
-#ifdef USE_COMC_THREAD_TO_READ
+#if USE_COMC_THREAD_TO_READ
 		if (!sc->comc.read_tail) {
 			sc->comc.read_head=walk;
 		} else {
@@ -407,12 +409,12 @@ struct com_cache_entry * get_com_cache_entry(struct scan_context * sc, size_t cc
 		CCT_WAKE(); // Make sure, we won't wait senselessly for the com_cache_thread.
 		CC_UNLOCK(sc->comc);
 		CCE_LOCK(walk);
-#else // #ifdef USE_COMC_THREAD_TO_READ
+#else // #if USE_COMC_THREAD_TO_READ
 		++sc->comc.num_in_memory;
 		CC_UNLOCK(sc->comc);
 		
 		comc_get(sc, walk);
-#endif // #ifdef USE_COMC_THREAD_TO_READ, else
+#endif // #if USE_COMC_THREAD_TO_READ, else
 		CCT_WAKE(); // Make sure the com cache thread gets woken up even is nothing really *needs* it, so it can do it's clean up job
 	} else {
 		++walk->num_in_use;
@@ -424,9 +426,9 @@ struct com_cache_entry * get_com_cache_entry(struct scan_context * sc, size_t cc
 }
 
 void release(struct scan_context * sc, struct com_cache_entry * ccge) {
-#ifndef THREADS
+#if !ALLOW_COM_CACHE_THREAD
 	ignore(sc); // prevent warning: unused parameter 'sc'
-#endif // #ifndef THREADS
+#endif // #if !ALLOW_COM_CACHE_THREAD
 	if (1 == ccge->num_in_use) {
 		comc_move_front(sc, ccge, false);
 	}
@@ -437,9 +439,9 @@ void release(struct scan_context * sc, struct com_cache_entry * ccge) {
 }
 
 void shutdown_com_cache_thread(struct scan_context * sc) {
-#ifndef THREADS
+#if !ALLOW_COM_CACHE_THREAD
 	ignore(sc); // prevent warning: unused parameter 'sc'
-#endif // #ifndef THREADS
+#endif // #if !ALLOW_COM_CACHE_THREAD
 	
 	TRF_WAIT(); // We misuse the table reader full lock to wait for the com cache thread to exit. However, TRF is known to be in the "waked" state right now, so wait for it once to reset it to default state.
 	exit_request_com_cache_thread=true;
@@ -462,20 +464,22 @@ void com_cache_init(struct scan_context * sc, u64 num_clusters) {
 	}
 	sc->comc.size = (num_clusters + sc->comc.clusters_per_entry - 1) / sc->comc.clusters_per_entry;
 	sc->comc.ccgroup=malloc(sc->comc.size*sizeof(*sc->comc.ccgroup));
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 	sc->comc.compr=malloc(sc->comc.size*sizeof(*sc->comc.compr));
-#endif // #ifdef COMC_IN_MEMORY
+#endif // #if COMC_IN_MEMORY
 	for (i=0;i<sc->comc.size;++i) {
 		sc->comc.ccgroup[i]=NULL;
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 		sc->comc.compr[i].ptr=NULL;
 		sc->comc.compr[i].len=0;
-#endif // #ifdef COMC_IN_MEMORY
+#endif // #if COMC_IN_MEMORY
 	}
 	sc->comc.head=NULL;
 	sc->comc.tail=NULL;
 	sc->comc.num_in_memory=0;
+#if USE_COMC_THREAD_TO_READ
 	sc->comc.read_head=NULL;
+#endif // #if USE_COMC_THREAD_TO_READ
 	sc->comc.read_tail=NULL;
 	
 	sc->comc.cbuflen = compressBound(8 * sc->comc.clusters_per_entry);
@@ -493,14 +497,14 @@ void com_cache_cleanup(struct scan_context * sc) {
 			}
 		}
 	}
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 	if (sc->comc.compr) {
 		for (u32 i=0;i<sc->comc.size;++i) {
 			free(sc->comc.compr[i].ptr);
 		}
 	}
 	free(sc->comc.compr);
-#endif // #ifdef COMC_IN_MEMORY
+#endif // #if COMC_IN_MEMORY
 	free(sc->comc.ccgroup);
 	btlock_lock_free(sc->comc.debug_lock);
 }

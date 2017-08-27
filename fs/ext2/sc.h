@@ -93,17 +93,16 @@ struct scan_context {
 	 * If threading support is deactivated, this is always false. This
 	 * way, code doesn't always have to use constructs like
 	 *
-	 * #ifndef THREADS
+	 * #if !THREADS
 	 * 	if (!sc->threads) {
-	 * #endif // #ifndef THREADS
+	 * #endif // #if !THREADS
 	 * 		so stuff without multithreading
-	 * #ifndef THREADS
+	 * #if !THREADS
 	 * 	if (!sc->threads) {
-	 * #endif // #ifndef THREADS
+	 * #endif // #if !THREADS
 	 */
-	bool threads;
-	bool allow_concurrent_chk_block_function;
-	bool allow_concurrent_table_reader;
+	bool allow_threads;
+	bool allow_com_cache_thread;
 	
 	/*
 	 * Tells, wether the reader is running in the background or not. If 
@@ -111,9 +110,11 @@ struct scan_context {
 	 * the next group, as it will most probably run out of memory if it 
 	 * doesn't.
 	 */
-	bool background;
+	bool allow_concurrent_table_reader;
 	
-#ifdef THREADS
+	bool allow_concurrent_chk_block_function;
+	
+#if THREADS
 	/*
 	 * A little bit eye-candy: As soon as the main loop has finished, we 
 	 * set waiting4threads to true, which causes threads being busy in the 
@@ -121,7 +122,7 @@ struct scan_context {
 	 * they just die off silently.
 	 */
 	volatile bool waiting4threads;
-#endif // #ifdef THREADS
+#endif // #if THREADS
 
 	/*
 	 * Some means to configure automatic runs. Currently I only provide a 

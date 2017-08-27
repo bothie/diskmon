@@ -45,7 +45,7 @@
  * If false, one table is read at a time and it's inodes are processed then 
  * before reading the next table. Good for memory constrained systems.
  */
-#define ALLOW_CONCURRENT_TABLE_READER 0
+#define ALLOW_CONCURRENT_TABLE_READER 1
 
 /*
  * If support for concurrent group table reader is compiled in, shall it be 
@@ -59,19 +59,60 @@
  * If true, an additional thread will to in background compression of dirty 
  * com cache entries.
  */
-#define ALLOW_COM_CACHE_THREAD 0
+#define ALLOW_COM_CACHE_THREAD 1
 
 /*
  * If support for concurrent com cache thread is compiled in, shall it be
  * used by default?
+ * 
+ * Note for running under VALGRIND: Please switch off the COMC thread. Since 
+ * Valgrind serializes all threads, so only one of them can run at any given 
+ * time, you will end up wasting much time in the compression of COMC 
+ * entries, which then get modified again. The whole point of the COMC 
+ * thread is to utilize the CPU compressing COMC entries while the other 
+ * threads are waiting for disk I/O, however, using VALGRIND, the threads 
+ * almost never wait for disk I/O, instead, they wait for VALGRIND - and you 
+ * really don't want another thread waiting for VALGRIND ...
+ * 
+ * OTOH: Running without valgrind, this may considerably speed up things.
  */
 #define USE_COM_CACHE_THREAD_DEFAULT true
 
 /*
- * If true, use the com cache thread to decompress needed com cache entries.
- * If false, whoever needs the entry decompresses it himself.
+ * If true, use the com cache thread to decompress needed com cache entries. 
+ * If false, whoever needs the entry decompresses it himself, thus allowing 
+ * multiple threads to decompress concurrently.
  */
 #define USE_COMC_THREAD_TO_READ 0
+
+/*
+ * Keep cluster owning map cache in memory. It will be compressed in blocks 
+ * tho.
+ */
+#define COMC_IN_MEMORY 1
+
+/*
+ * How many COMC entries shall be kept in memory? Please note: In conjunction 
+ * with COMC_IN_MEMORY, MAX_COMC_IN_MEMORY means: Number of *uncompressed* 
+ * (i.e. ready to use) COMC entries, since with COMC_IN_MEMORY, even the 
+ * compressed COMC entries remain in memory, they do not contribute to this 
+ * upper limit.
+ */
+#define MAX_COMC_IN_MEMORY 512
+
+/*
+ * Max number of dirty COMC entries.
+ * 
+ * With threads, you should let enough room for clean comc entries, so reader 
+ * threads don't have to wait for dirty COMC entries to get written out.
+ * Without threads (or with the COMC thread turned off, there isn't really 
+ * any need for much clean COMC entries. Just keep MAX_COMC_DIRTY one or two 
+ * lower than MAX_COMC_IN_MEMORY.
+ * 
+ * BTW: With COMC_IN_MEMORY, "wait for dirty COMC entries to get written out"
+ * means: Wait for them to get compressed.
+ */
+#define MAX_COMC_DIRTY 384
 
 /*
  * 295 threads (plus two or three or so) is a limit of valgrind
@@ -87,11 +128,6 @@
 #endif
 
 #endif // #if THREADS
-
-/*
- * Keep cluster owning map cache in memory. It will be compressed in blocks tho.
- */
-#define COMC_IN_MEMORY 1
 
 /*
  *
@@ -135,22 +171,6 @@
  * off, again, switching on explicitly cause them to remain switched on.
  */
 #define PRINT_MARK_ALL 0
-
-/*
- * With threads, you should let enough room for clean comc entries, so reader 
- * threads don't have to wait for dirty comc entries to get written out.
- */
-// #define MAX_COMC_IN_MEMORY 448
-// #define MAX_COMC_DIRTY 384
-// #define MAX_COMC_IN_MEMORY 128
-// #define MAX_COMC_DIRTY 96
-// #define MAX_COMC_IN_MEMORY 512
-// #define MAX_COMC_DIRTY 448
-// #define MAX_COMC_IN_MEMORY 32
-// #define MAX_COMC_DIRTY 24
-
-#define MAX_COMC_IN_MEMORY 512
-#define MAX_COMC_DIRTY 510
 
 #if PRINT_MARK_ALL
 #	ifndef PRINT_MARK_SB0GAP

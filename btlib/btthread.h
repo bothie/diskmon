@@ -1,15 +1,15 @@
 #ifndef BTTHREAD_H
 #define BTTHREAD_H
 
-#ifndef THREADS
+#if !THREADS
 #	include "btthread_nothreads.h"
 
-#else // #ifndef THREADS
-#	ifdef BTCLONE
+#else // #if !THREADS
+#	if BTCLONE
 #		include "btthread_btclone.h"
-#	else // #ifdef BTCLONE
+#	else // #if BTCLONE
 #		include "btthread_pthread.h"
-#	endif // #ifdef BTCLONE, else
+#	endif // #if BTCLONE, else
 
 #include <stdbool.h>
 
@@ -19,6 +19,6 @@ struct thread_ctx * create_thread(size_t min_stack_size, THREAD_RETURN_TYPE (*th
 void cleanup_thread(struct thread_ctx * thread_ctx);
 bool terminated_thread(struct thread_ctx * thread_ctx);
 
-#endif // #ifndef THREADS, else
+#endif // #if !THREADS, else
 
 #endif // #ifndef BTTHREAD_H

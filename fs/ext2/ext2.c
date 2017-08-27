@@ -37,7 +37,7 @@
 #include <utime.h>
 #include <zlib.h>
 
-#ifdef THREADS
+#if THREADS
 #include <btthread.h>
 /*
 #include <signal.h>
@@ -45,7 +45,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 */
-#endif // #ifdef THREADS
+#endif // #if THREADS
 
 #ifdef HAVE_VALGRIND
 #include <valgrind/valgrind.h>
@@ -165,8 +165,8 @@ bool group_has_super_block(const struct super_block * sb,unsigned group) {
 bool read_table_for_one_group(struct scan_context * sc, bool prefetching) {
 	u8 *    it_b;
 	
-#ifdef THREADS
-	if (sc->threads) {
+#if ALLOW_CONCURRENT_TABLE_READER
+	if (sc->allow_concurrent_table_reader) {
 		unsigned counter = 0;
 		
 		while (atomic_get(&sc->prereaded) == MAX_INODE_TABLE_PREREADED) {
@@ -177,11 +177,11 @@ bool read_table_for_one_group(struct scan_context * sc, bool prefetching) {
 		}
 		it_b = (u8*)(sc->inode_table + sc->sb->inodes_per_group * (sc->table_reader_group % INODE_TABLE_ROUNDROUBIN));
 	} else {
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 		it_b = (u8*)sc->inode_table;
-#ifdef THREADS
+#if ALLOW_CONCURRENT_TABLE_READER
 	}
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 	
 	u8 *    cb_b=sc->cluster_allocation_map+sc->cluster_size_Bytes*sc->table_reader_group;
 	u8 *    ib_b=sc->inode_allocation_map+sc->sb->inodes_per_group/8*sc->table_reader_group;
@@ -437,11 +437,13 @@ bool read_table_for_one_group(struct scan_context * sc, bool prefetching) {
 	}
 	
 	{
-#ifdef THREADS
-		struct inode * inode = sc->inode_table + sc->sb->inodes_per_group * (sc->table_reader_group % INODE_TABLE_ROUNDROUBIN);
-#else // #ifdef THREADS
 		struct inode * inode = sc->inode_table;
-#endif // #ifdef THREADS, else
+		
+#if ALLOW_CONCURRENT_TABLE_READER
+		if (sc->allow_concurrent_table_reader) {
+			inode += sc->sb->inodes_per_group * (sc->table_reader_group % INODE_TABLE_ROUNDROUBIN);
+		}
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 		
 		for (unsigned i = 0; i < (sc->sb->inodes_per_group - sc->gdt[sc->table_reader_group].num_virgin_inodes); ++i) {
 			endian_swap_inode(inode + i);
@@ -1089,7 +1091,7 @@ u32 chk_extent_block(struct inode_scan_context * isc, u32 file_cluster, char * e
 	return file_cluster;
 }
 
-#ifdef THREADS
+#if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 typedef VASIAR(struct thread *) vasiar_struct_thread_pointer;
 vasiar_struct_thread_pointer ind[5];
 struct btlock_lock * ind_lock;
@@ -1118,7 +1120,7 @@ struct thread * find_next_job() {
 	btlock_unlock(ind_lock);
 	return NULL;
 }
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 
 void do_chk_block(struct inode_scan_context * isc, bool free_isc) {
 	struct scan_context * sc = isc->sc;
@@ -1287,7 +1289,6 @@ THREAD_RETURN_TYPE chk_block_function(THREAD_ARGUMENT_TYPE arg) {
 		if (t->lock) {
 			btlock_lock(t->lock);
 			btlock_unlock(t->lock);
-			btlock_lock_free(t->lock);
 		}
 	}
 start_work: ;
@@ -1369,7 +1370,19 @@ void try_clone_succeeded(struct thread * t) {
 	register_job(t);
 	
 	btlock_unlock(t->lock);
-	
+}
+
+void do_try_clone(struct thread * t) {
+	t->thread_ctx = create_thread(65536, chk_block_function, (void *)t);
+	if (!t->thread_ctx) {
+		eprintf("clone failed\n");
+		try_clone_failed(t);
+	} else {
+		try_clone_succeeded(t);
+	}
+}
+
+void try_clone() {
 	{
 		struct thread * walk = thread_head->next;
 		while (walk->next) {
@@ -1386,19 +1399,7 @@ void try_clone_succeeded(struct thread * t) {
 			walk = walk->next;
 		}
 	}
-}
-
-void do_try_clone(struct thread * t) {
-	t->thread_ctx = create_thread(65536, chk_block_function, (void *)t);
-	if (!t->thread_ctx) {
-		eprintf("clone failed\n");
-		try_clone_failed(t);
-	} else {
-		try_clone_succeeded(t);
-	}
-}
-
-void try_clone() {
+	
 	while (live_child < hard_child_limit) {
 		struct thread * t = find_next_job();
 		if (!t) break;
@@ -1445,8 +1446,6 @@ void cluster_scan_inode(struct inode_scan_context * isc) {
 	
 	t->isc = isc;
 	
-	bool try_clone = false;
-	
 #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 	if (isc->sc->allow_concurrent_chk_block_function) {
 		t->lock = btlock_lock_mk();
@@ -1477,18 +1476,19 @@ void cluster_scan_inode(struct inode_scan_context * isc) {
 		||  (level == 1 && RUNNING_ON_VALGRIND)
 #endif // #ifdef HAVE_VALGRIND
 		||  false) {
-			try_clone = false;
+			try_clone_failed(t);
 		} else {
 			btlock_lock(ind_lock);
 			VANEW(ind[level]) = t;
 			btlock_unlock(ind_lock);
+			try_clone();
 		}
+	} else {
+#endif // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
+		try_clone_failed(t);
+#if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 	}
 #endif // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
-	
-	if (!try_clone) {
-		try_clone_failed(t);
-	}
 }
 
 void typecheck_inode(struct inode_scan_context * isc, struct inode * inode) {
@@ -1603,11 +1603,11 @@ bool check_inode(struct scan_context * sc, unsigned long inode_num, bool prefetc
 		}
 		
 		struct inode * inode = isc->sc->inode_table + i;
-#ifdef THREADS
-		if (sc->threads) {
+#if ALLOW_CONCURRENT_TABLE_READER
+		if (sc->allow_concurrent_table_reader) {
 			inode += isc->sc->sb->inodes_per_group * (g % INODE_TABLE_ROUNDROUBIN);
 		}
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 		
 		struct inode * inode_copy=malloc(128);
 		assert(inode_copy);
@@ -1627,8 +1627,8 @@ bool check_inode(struct scan_context * sc, unsigned long inode_num, bool prefetc
 	assert(!get_calculated_inode_allocation_map_bit(isc->sc,isc->inode_num));
 	
 	if (!isc->inode->links_count) {
-		if (!isc->keep_inode) free(isc->inode);
 		bool retval = isc->sc->inode_type[isc->inode_num - 1] == FT_FREE;
+		if (!isc->keep_inode) free(isc->inode);
 		free(isc);
 		return retval;
 	}
@@ -2058,12 +2058,6 @@ bool check_inode(struct scan_context * sc, unsigned long inode_num, bool prefetc
 	 */
 	
 	cluster_scan_inode(isc);
-	
-#if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
-	if (sc->allow_concurrent_chk_block_function) {
-		try_clone();
-	}
-#endif // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 	
 	ignore(ok);
 	

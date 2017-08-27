@@ -32,10 +32,10 @@
 #include <unistd.h>
 #include <zlib.h>
 
-#ifdef THREADS
+#if THREADS
 #include <signal.h>
 #include <sys/types.h>
-#endif // #ifdef THREADS
+#endif // #if THREADS
 
 #define LIST_VASIAR(vasiar,list,FMT,castfunction) do { \
 	struct string_factory * sf=sf_new(); \
@@ -96,12 +96,37 @@ bool fsck(const char * _name) {
 	
 	MALLOC1(sc);
 	
-	sc->threads = USE_THREADS_DEFAULT;
-	sc->allow_concurrent_chk_block_function = ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION;
-	/*
-	sc->allow_concurrent_table_reader = ALLOW_CONCURRENT_TABLE_READER;
-	*/
+#if THREADS
+	sc->allow_threads = USE_THREADS_DEFAULT;
+#else // #if THREADS
+	sc->allow_threads = false;
+#endif // #if THREADS, else
+	
+#if ALLOW_COM_CACHE_THREAD
+	sc->allow_com_cache_thread = USE_COM_CACHE_THREAD_DEFAULT;
+#else // #if ALLOW_COM_CACHE_THREAD
+	sc->allow_com_cache_thread = false;
+#endif // #if ALLOW_COM_CACHE_THREAD, else
+	
+#if ALLOW_CONCURRENT_TABLE_READER
+	sc->allow_concurrent_table_reader = USE_CONCURRENT_TABLE_READER_DEFAULT;
+#else // #if ALLOW_CONCURRENT_TABLE_READER
 	sc->allow_concurrent_table_reader = false;
+#endif // #if ALLOW_CONCURRENT_TABLE_READER, else
+	
+#if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
+	sc->allow_concurrent_chk_block_function = USE_CONCURRENT_CHK_BLOCK_FUNCTION_DEFAULT;
+#else // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
+	sc->allow_concurrent_chk_block_function = false;
+#endif // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION, else
+	
+	if (true
+	&&  !sc->allow_com_cache_thread
+	&&  !sc->allow_concurrent_table_reader
+	&&  !sc->allow_concurrent_chk_block_function
+	&&  true) {
+		sc->allow_threads = false;
+	}
 	
 	/*
 	 * Dump files without errors to rescued/ok and those with errors
@@ -176,9 +201,9 @@ bool fsck(const char * _name) {
 	sc->cluster_allocation_map=NULL;
 	sc->inode_allocation_map=NULL;
 	sc->comc.ccgroup=NULL;
-#ifdef COMC_IN_MEMORY
+#if COMC_IN_MEMORY
 	sc->comc.compr=NULL;
-#endif // #ifdef COMC_IN_MEMORY
+#endif // #if COMC_IN_MEMORY
 	sc->inode_problem_context = NULL;
 	
 	struct thread_ctx * com_cache_thread_ctx = NULL;
@@ -1116,19 +1141,19 @@ recheck_compat_flags:
 		}
 		inode_table_len=sizeof(*sc->inode_table);
 		assert(sc->sb->num_inodes==(sc->sb->num_inodes/sc->sb->inodes_per_group)*sc->sb->inodes_per_group);
-#ifdef THREADS
-		if (sc->threads) {
+#if ALLOW_CONCURRENT_TABLE_READER
+		if (sc->allow_concurrent_table_reader) {
 			if ((sc->sb->num_inodes/sc->sb->inodes_per_group)>INODE_TABLE_ROUNDROUBIN) {
 				inode_table_len*=sc->sb->inodes_per_group*INODE_TABLE_ROUNDROUBIN;
 			} else {
 				inode_table_len*=sc->sb->num_inodes;
 			}
 		} else {
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 			inode_table_len*=sc->sb->inodes_per_group;
-#ifdef THREADS
+#if ALLOW_CONCURRENT_TABLE_READER
 		}
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 		--inode_table_len;
 		if (inode_table_len!=lseek(inode_table_fd,inode_table_len,SEEK_SET)) {
 			eprintf("main-thread: OOPS: Couldn't seek in file /ramfs/inode_table: %s",strerror(errno));
@@ -1218,6 +1243,9 @@ recheck_compat_flags:
 	}
 	
 #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
+	MALLOC1(thread_head);
+	MALLOC1(thread_tail);
+	
 	thread_head->lock=btlock_lock_mk();
 	thread_tail->lock=btlock_lock_mk();
 	assert(thread_head->lock && thread_tail->lock);
@@ -1225,20 +1253,20 @@ recheck_compat_flags:
 //	thread_tail->tid=0;
 	thread_head->next=thread_tail; thread_head->prev=NULL;
 	thread_tail->prev=thread_head; thread_tail->next=NULL;
+	
+	ind_lock=btlock_lock_mk();
 #endif // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
 	
-#ifdef THREADS
-	ind_lock=btlock_lock_mk();
-	MALLOC1(thread_head);
-	MALLOC1(thread_tail);
-	
+#if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
+#if 0
 	/*
 	 * We mis-use this variable here to mark, that the new cluster scan 
 	 * threads should be reported to the user. Normally they are just 
 	 * silently created.
 	 */
 	sc->waiting4threads=true;
-	sc->background=false;
+	bool saved_allow_concurrent_table_reader = sc->allow_concurrent_table_reader;
+	sc->allow_concurrent_table_reader = false;
 	
 	/*
 	 * This starts the cluster allocation check for very big inodes 
@@ -1248,8 +1276,7 @@ recheck_compat_flags:
 	 * the CLONE feature is present. If it is not, this inodes will be 
 	 * reqularly processed with all the others as they are at turn.
 	 */
-	/*
-	if (sc->threads) {
+	if (sc->allow_concurrent_chk_block_function) {
 		check_inode(sc,385,true);
 		check_inode(sc,389,true);
 		check_inode(sc,4238220,true);
@@ -1257,57 +1284,53 @@ recheck_compat_flags:
 		check_inode(sc,4238223,true);
 		check_inode(sc,6145418,true);
 	}
-	*/
-	sc->waiting4threads=false;
-	sc->background=sc->threads;
+	sc->allow_concurrent_table_reader = saved_allow_concurrent_table_reader;
+#endif // #if 0
 	
-	if (sc->threads) {
+	sc->waiting4threads = false;
+#endif // #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
+	
+#if THREADS
+	if (sc->allow_threads) {
 		eprintf("Executing ext2_fsck main thread via thread %i\n", gettid());
 	}
-#else // #ifndef THREADS
-	sc->threads = false;
-	sc->background = false;
-#endif // #ifndef THREADS, else
+#endif // #if THREADS
 	
 	sc->table_reader_group=0;
 	sc->com_cache_thread_lock=btlock_lock_mk();
 	sc->table_reader_full=btlock_lock_mk();
 	sc->table_reader_empty=btlock_lock_mk();
 	
-#ifdef THREADS
-	if (sc->threads) {
+#if ALLOW_COM_CACHE_THREAD
+	if (sc->allow_com_cache_thread) {
 		com_cache_thread_ctx = create_thread(65536, com_cache_thread, (THREAD_ARGUMENT_TYPE)sc);
 		if (!com_cache_thread_ctx) {
 			NOTIFY("clone for com_cache_thread failed, switching multithreading off.\n");
-			sc->threads=false;
-			// FIXME: If we started some background threads earlier, wait for them before
-			// setting sc->threads to false
+			sc->allow_com_cache_thread = false;
 		}
 	}
-#endif // #ifdef THREADS
+#endif // #if ALLOW_COM_CACHE_THREAD
 	
-#ifdef ALLOW_CONCURRENT_TABLE_READER
-#ifdef THREADS
-	if (sc->background) {
+#if ALLOW_CONCURRENT_TABLE_READER
+	if (sc->allow_concurrent_table_reader) {
 		ext2_read_tables_thread_ctx = create_thread(65536, ext2_read_tables, (THREAD_ARGUMENT_TYPE)sc);
 		if (!ext2_read_tables_thread_ctx) {
 			NOTIFY("clone for ext2_read_tables thread failed (so we have to read the tables in the main thread).");
-#endif // #ifdef THREADS
-#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
-			sc->background=false;
-#ifdef ALLOW_CONCURRENT_TABLE_READER
-#ifdef THREADS
+			sc->allow_concurrent_table_reader = false;
 		} else {
 			++live_child;
 		}
 	}
-#endif // #ifdef THREADS
-#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 	
-#ifdef THREADS
-	struct progress_bar * live_child_progress_bar=progress_bar_mk(2,hard_child_limit);
-	assert(live_child_progress_bar);
-#endif // #ifdef THREADS
+#if THREADS
+	struct progress_bar * live_child_progress_bar = NULL; // warning: 'live_child_progress_bar' may be used uninitialized in this function [-Wmaybe-uninitialized]
+	
+	if (sc->allow_threads) {
+		live_child_progress_bar = progress_bar_mk(2, hard_child_limit);
+		assert(live_child_progress_bar);
+	}
+#endif // #if THREADS
 	
 	{
 		u32 size_of_gdt_Clusters=(sc->size_of_gdt_Blocks+sc->cluster_size_Blocks-1)/sc->cluster_size_Blocks;
@@ -1319,14 +1342,15 @@ recheck_compat_flags:
 		*/
 		
 		OPEN_PROGRESS_BAR_LOOP(1,inode_num,sc->sb->num_inodes)
-			
-#ifdef THREADS
-			if (sc->threads) {
+		
+#if THREADS
+			if (sc->allow_threads) {
 				print_stalled_progress_bar(live_child_progress_bar,live_child);
 			}
+#endif // #if THREADS
 			
-#ifdef ALLOW_CONCURRENT_TABLE_READER
-			if (sc->background) {
+#if ALLOW_CONCURRENT_TABLE_READER
+			if (sc->allow_concurrent_table_reader) {
 				while (sc->table_reader_group==group) {
 					PROGRESS_STALLED(inode_num);
 					try_clone();
@@ -1334,14 +1358,11 @@ recheck_compat_flags:
 					TRE_WAIT();
 				}
 			} else {
-#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 				read_table_for_one_group(sc, false);
-#ifdef THREADS
-#ifdef ALLOW_CONCURRENT_TABLE_READER
+#if ALLOW_CONCURRENT_TABLE_READER
 			}
-#endif // #ifdef ALLOW_CONCURRENT_TABLE_READER
-#endif // #ifdef THREADS
+#endif // #if ALLOW_CONCURRENT_TABLE_READER
 			
 			assert(sc->table_reader_group>group);
 			
@@ -1397,7 +1418,7 @@ recheck_compat_flags:
 			}
 			
 #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
-			if (sc->threads) {
+			if (sc->allow_concurrent_chk_block_function) {
 				struct thread * walk=thread_head->next;
 				while (walk->next) {
 					if (terminated_thread(walk->thread_ctx)) {
@@ -1458,7 +1479,7 @@ recheck_compat_flags:
 	}
 	
 #if ALLOW_CONCURRENT_CHK_BLOCK_FUNCTION
-	if (sc->threads) {
+	if (sc->allow_concurrent_chk_block_function) {
 		eprintf("Waiting for unfinished background jobs to finish ...\n");
 		
 		sc->waiting4threads=true;
@@ -2200,11 +2221,11 @@ recheck_compat_flags:
 		*/
 	}
 	gzclose(gzf);
-#ifdef THREADS
-	if (sc->threads) {
+#if ALLOW_COM_CACHE_THREAD
+	if (sc->allow_com_cache_thread) {
 		shutdown_com_cache_thread(sc);
 	}
-#endif // #ifdef THREADS
+#endif // #if ALLOW_COM_CACHE_THREAD
 	
 	/*
 	for (u32 cluster=0;cluster<sc->sb->num_clusters;++cluster) {
@@ -2333,7 +2354,6 @@ cleanup:
 		close(inode_table_fd);
 		free(sc->cam_lock);
 		free(sc->progress_bar);
-		free(sc->sb);
 		free(sc->dir);
 //		free(sc->list_head);
 //		assert(sc->list_tail==sc->list_head);
@@ -2350,12 +2370,10 @@ cleanup:
 				++inode_num;
 				if (sc->inode_owning_map) {
 					vasiar_struct_inode_owning_map_entry_vasiar * ome=sc->inode_owning_map+inode_num-1;
-					if (ome) {
-						for (size_t i=0;i<VASIZE(*ome);++i) {
-							free(VAACCESS(*ome,i));
-						}
-						VAFREE(*ome);
+					for (size_t i=0;i<VASIZE(*ome);++i) {
+						free(VAACCESS(*ome,i));
 					}
+					VAFREE(*ome);
 				}
 				if (sc->inode_problem_context) {
 					struct problem_context * pc=get_problem_context(sc,inode_num);
