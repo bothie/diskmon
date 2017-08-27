@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <btmacros.h>
 #include <btmath.h>
+#include <btstr.h>
 #include <bttime.h>
 #include <fcntl.h>
 #include <errno.h>
