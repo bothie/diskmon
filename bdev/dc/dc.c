@@ -101,7 +101,7 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 	} else if (!strstartcmp(p, ":")) {
 		++p;
 	} else {
-		volatile unsigned long long s;
+		unsigned long long s;
 		volatile block_t _size;
 		if (':' == parse_unsigned_long_long(&p, &s)) {
 			have_size = true;
