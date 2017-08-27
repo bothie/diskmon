@@ -81,7 +81,6 @@ VASIAR(struct dc) device;
  */
 static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,const char * args) {
 	ignore(bdev_driver);
-	ignore(name);
 	
 	bool dump_differences=true; // false;
 	
