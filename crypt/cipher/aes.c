@@ -75,8 +75,8 @@
  * @word: value to rotate
  * @shift: bits to roll
  */
-static inline u32 rol32(u32 word,unsigned int shift) {
-	return (word<<shift)|(word>>(32-shift));
+static inline u32 rol32(u32 value, unsigned int shift) {
+	return (value << shift) | (value >> (32 - shift));
 }
 
 /**
@@ -84,8 +84,8 @@ static inline u32 rol32(u32 word,unsigned int shift) {
  * @word: value to rotate
  * @shift: bits to roll
  */
-static inline u32 ror32(u32 word,unsigned int shift) {
-	return (word>>shift)|(word<<(32-shift));
+static inline u32 ror32(u32 value, unsigned int shift) {
+	return (value >> shift) | (value << (32 - shift));
 }
 
 #define CIPHER_NAME "aes"

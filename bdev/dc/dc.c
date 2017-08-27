@@ -135,22 +135,22 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 				goto err;
 			}
 			
-			char * name=malloc(p-s+1);
-			if (!name) {
+			char * dname = malloc(p - s + 1);
+			if (!dname) {
 				ERROR("Couldn't allocate memory for device name.");
 				goto err;
 			}
-			memcpy(name,s,p-s);
-			name[p-s]=0;
+			memcpy(dname, s, p - s);
+			dname[p-s]=0;
 			dv=&VANEW(device);
 			dv->ignore=false;
 			dv->report_all_read_errors = false;
 			dv->report_first_read_error = true;
-			dv->name=name;
+			dv->name = dname;
 			dv->buffer=NULL;
-			dv->bdev=bdev_lookup_bdev(name);
+			dv->bdev = bdev_lookup_bdev(dname);
 			if (!dv->bdev) {
-				ERRORF("Couldn't lookup device %s.",name);
+				ERRORF("Couldn't lookup device %s.", dname);
 				eprintf("vs=%u,p=%s\ns=%s\n",(unsigned)VASIZE(device),p,s);
 				goto err;
 			}

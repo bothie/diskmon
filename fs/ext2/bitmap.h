@@ -62,15 +62,15 @@ void get_owner_both(struct scan_context * sc, u64 cluster, u32 * inode, u64 * cl
 } while (0)
 
 #define MARK_CLUSTERS_IN_USE_BY(sc, _c, _num, _inode, _new_cluster) do { \
-	u64 c=(_c); \
-	size_t num=(_num); \
-	u32 inode=(_inode); \
-	u64 new_cluster = (_new_cluster); \
-	while (num) { \
-		if (set_owners(sc, &c, &num, inode, new_cluster)) { \
-			MARK_CLUSTER_IN_USE_BY(sc, c, inode, new_cluster); \
-			++c; \
-			--num; \
+	u64 c ## __LINE__ = (_c); \
+	size_t num ## __LINE__ = (_num); \
+	u32 inode ## __LINE__ = (_inode); \
+	u64 new_cluster ## __LINE__ = (_new_cluster); \
+	while (num ## __LINE__) { \
+		if (set_owners(sc, &c ## __LINE__, &num ## __LINE__, inode ## __LINE__, new_cluster ## __LINE__)) { \
+			MARK_CLUSTER_IN_USE_BY(sc, c ## __LINE__, inode ## __LINE__, new_cluster ## __LINE__); \
+			++c ## __LINE__; \
+			--num ## __LINE__; \
 		} \
 	} \
 } while (0)

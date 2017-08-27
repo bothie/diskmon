@@ -351,19 +351,19 @@ bool read_table_for_one_group(struct scan_context * sc, bool prefetching) {
 				
 				struct inode * it=(struct inode *)error_bitmap;
 				int ni=bs/sizeof(struct inode);
-				for (int j = 0; j < ni; ++j) {
+				for (int k = 0; k < ni; ++k) {
 					#define FIELD_TEST_MASK(fieldname, fieldmask, fieldflag) do { \
-						if (it[j].fieldname & fieldmask) { \
+						if (it[k].fieldname & fieldmask) { \
 							if (!msg) { msg = mstrcpy("Errors in fields: "); } \
-							char * tmp = msg; msg = mprintf("%s%c", tmp, fieldflag); free(tmp); \
-							it[j].fieldname &= ~fieldmask; \
+							char * tmp ## __LINE__ = msg; msg = mprintf("%s%c", tmp ## __LINE__, fieldflag); free(tmp ## __LINE__); \
+							it[k].fieldname &= ~fieldmask; \
 						} \
 					} while (0)
 					#define FIELD_TEST(fieldname, fieldflag) do { \
-						if (it[j].fieldname) { \
+						if (it[k].fieldname) { \
 							if (!msg) { msg = mstrcpy("Errors in fields: "); } \
-							char * tmp = msg; msg = mprintf("%s%c", tmp, fieldflag); free(tmp); \
-							it[j].fieldname = 0; \
+							char * tmp ## __LINE__ = msg; msg = mprintf("%s%c", tmp ## __LINE__, fieldflag); free(tmp ## __LINE__); \
+							it[k].fieldname = 0; \
 						} \
 					} while (0)
 					
@@ -389,8 +389,8 @@ bool read_table_for_one_group(struct scan_context * sc, bool prefetching) {
 					FIELD_TEST(fsize, 'z');
 				}
 				
-				for (unsigned j = 0; j < bs; ++j) {
-					if (error_bitmap[j]) {
+				for (unsigned k = 0; k < bs; ++k) {
+					if (error_bitmap[k]) {
 						have_soft_errors = true;
 						create_problem_context = true;
 						break;
@@ -1071,7 +1071,7 @@ u32 chk_extent_block(struct inode_scan_context * isc, u32 file_cluster, char * e
 			file_cluster = ed->file_cluster + real_length;
 			
 			block_t disc_cluster = (block_t)ed->disk_cluster_lo | ((block_t)ed->disk_cluster_hi << 16);
-			for (unsigned num = real_length; num--; ) {
+			for (; real_length--; ) {
 				chk_block(isc, 0, disc_cluster++, containing_cluster);
 			}
 		}

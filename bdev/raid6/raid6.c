@@ -749,7 +749,7 @@ print_err:
 				}
 				
 //				printf("private->disk[d].sb.v0->disks[*].state={");
-				for (int i=0;i<MD_SB_DISKS;++i) {
+				for (i = 0; i < MD_SB_DISKS; ++i) {
 					unsigned s=private->disk[d].sb.v0->disks[i].state;
 					if (i) {
 						if (!private->disk[d].sb.v0->disks[i].raid_disk) {
@@ -2033,14 +2033,14 @@ regen_permutation:
 			 * TODO: Check this and maybe remove this block again.
 			 */
 			{
-				u8 * testing_dataptrs[nd];
+				u8 * testing_dataptrs2[nd];
 				for (unsigned i = 0; i < private->data_disks; ++i) {
-					testing_dataptrs[i] = dataptrs[i];
+					testing_dataptrs2[i] = dataptrs[i];
 				}
 				for (unsigned i = 0; i < 2; ++i) {
-					testing_dataptrs[private->data_disks + i] = v_buffer[i];
+					testing_dataptrs2[private->data_disks + i] = v_buffer[i];
 				}
-				ALGO.gen_syndrome(nd, block_size, testing_dataptrs);
+				ALGO.gen_syndrome(nd, block_size, testing_dataptrs2);
 			}
 			
 			bool report_mismatch = !i_buffer;
@@ -2130,16 +2130,16 @@ out_report_test: ;
 							, (unsigned long)private->disk[mapping[d]].events
 							, (unsigned long)private->max_events
 						);
-						unsigned byte = 0;
+						unsigned my_byte = 0;
 						size_t sl;
 						char * bs_str = mprintf_sl(&sl, "%llx", (unsigned long long)(block_size - 1));
 						free(bs_str);
 						for (unsigned line = 0; line < block_size; line += 16) {
 							eprintf("%0*x:", (int)sl, line);
 							
-							unsigned saved_byte = byte;
+							unsigned saved_byte = my_byte;
 							
-							for (unsigned column = 0; column < 16 && byte < block_size; ++column, ++byte) {
+							for (unsigned column = 0; column < 16 && my_byte < block_size; ++column, ++my_byte) {
 								char * extra;
 								if (!(column & 3)) {
 									if (column) {
@@ -2168,7 +2168,7 @@ out_report_test: ;
 								
 								u8 diff_mask = 0;
 								for (unsigned p = 0; p < private->parity_disks; ++p) {
-									diff_mask |= p_buffer[p][byte] ^ v_buffer[p][byte];
+									diff_mask |= p_buffer[p][my_byte] ^ v_buffer[p][my_byte];
 								}
 								if (!diff_mask) {
 									mt = MATCH;
@@ -2185,7 +2185,7 @@ out_report_test: ;
 										} else {
 											mt = IGNORE;
 											for (unsigned dd = 0; dd < private->data_disks; ++dd) {
-												if (i_buffer[dd] && (i_buffer[dd][byte] & diff_mask) != diff_mask) {
+												if (i_buffer[dd] && (i_buffer[dd][my_byte] & diff_mask) != diff_mask) {
 													if (dd == d) {
 														mt = ERROR;
 														break;
@@ -2197,16 +2197,16 @@ out_report_test: ;
 									}
 								}
 								
-								eprintf("%s\033[%sm%02x\033[0m", extra, mt_color[mt], (unsigned)dataptr[byte]);
+								eprintf("%s\033[%sm%02x\033[0m", extra, mt_color[mt], (unsigned)dataptr[my_byte]);
 							}
 							
-							byte = saved_byte;
+							my_byte = saved_byte;
 							
 							eprintf("  ");
 							
-							for (unsigned column = 0; column < 16 && byte < block_size; ++column, ++byte) {
-								if (dataptr[byte] >= 32 && dataptr[byte] < 127) {
-									eprintf("%c", dataptr[byte]);
+							for (unsigned column = 0; column < 16 && my_byte < block_size; ++column, ++my_byte) {
+								if (dataptr[my_byte] >= 32 && dataptr[my_byte] < 127) {
+									eprintf("%c", dataptr[my_byte]);
 								} else {
 									eprintf(".");
 								}

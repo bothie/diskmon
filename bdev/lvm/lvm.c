@@ -279,16 +279,16 @@ static inline struct string_node * sf_mknode_string_reown0(const char * s) {
 	return sf_mknode_buffer_reown0(s,strlen(s));
 }
 
-static inline char * unparse_uuid(uuid uuid) {
+static inline char * unparse_uuid(uuid my_uuid) {
 	return mprintf(
 		"%.6s-%.4s-%.4s-%.4s-%.4s-%.4s-%.6s"
-		,uuid
-		,uuid+6
-		,uuid+10
-		,uuid+14
-		,uuid+18
-		,uuid+22
-		,uuid+26
+		, my_uuid +  0
+		, my_uuid +  6
+		, my_uuid + 10
+		, my_uuid + 14
+		, my_uuid + 18
+		, my_uuid + 22
+		, my_uuid + 26
 	);
 }
 
@@ -508,7 +508,7 @@ static bool remove_from_free_ranges(range_vasiar_t * free_ranges,block_t offset,
 	return true;
 }
 
-static bool parse_fancy_uuid(const char * * p,uuid uuid) {
+static bool parse_fancy_uuid(const char * * p, uuid my_uuid) {
 	if ((*p)[ 6]!='-'
 	||  (*p)[11]!='-'
 	||  (*p)[16]!='-'
@@ -520,7 +520,7 @@ static bool parse_fancy_uuid(const char * * p,uuid uuid) {
 	const char * s=*p;
 	for (int i=0;i<32;) {
 		if (isalnum(**p)) {
-			uuid[i++]=**p;
+			my_uuid[i++] = **p;
 		} else if (**p!='-') {
 			return false;
 		}
@@ -529,7 +529,7 @@ static bool parse_fancy_uuid(const char * * p,uuid uuid) {
 	if (*p-s!=38) {
 		return false;
 	}
-	uuid[32]=0;
+	my_uuid[32] = 0;
 	return true;
 }
 
@@ -830,11 +830,14 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 	struct pv_superblock * pv=(struct pv_superblock *)buffer;
 	struct vg_superblock * vg=(struct vg_superblock *)buffer;
 	while (*arg_p) {
-		const char * s=arg_p;
-		while (*arg_p && *arg_p!=' ') ++arg_p;
-		char * disk_device_name=malloc(arg_p-s+1);
-		memcpy(disk_device_name,s,arg_p-s);
-		disk_device_name[arg_p-s]=0;
+		char * disk_device_name;
+		{
+			const char * s = arg_p;
+			while (*arg_p && *arg_p != ' ') ++arg_p;
+			disk_device_name = malloc(arg_p - s + 1);
+			memcpy(disk_device_name, s, arg_p - s);
+			disk_device_name[arg_p - s] = 0;
+		}
 		lvm->bdev[num_disks]=bdev_lookup_bdev(disk_device_name);
 		if (!lvm->bdev[num_disks]) {
 			ERROR("Couldn't locate all devices.");
@@ -1048,7 +1051,7 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 		,c->pe_size
 	);
 	for (unsigned i=0;i<npvs;++i) {
-		struct pv_in_core * pv=&VAACCESS(c->pv,i);
+		struct pv_in_core * pvic = &VAACCESS(c->pv, i);
 		printf(
 			"\tPhysical volume %i:\n"
 			"\t\tGiven in Argument %i\n"
@@ -1056,17 +1059,17 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 			"\t\tUUID: %.32s\n"
 			"\t\tFirst block of PV data heap (in blocks): %llu\n"
 			"\t\tNum physical extents in dh (in PEs): %llu\n"
-			,i
-			,lvm->pv[i].num
-			,pv->device
-			,pv->uuid
-			,(unsigned long long)pv->first_pe_start_block
-			,(unsigned long long)pv->pe_count
+			, i
+			, lvm->pv[i].num
+			, pvic->device
+			, pvic->uuid
+			, (unsigned long long)pvic->first_pe_start_block
+			, (unsigned long long)pvic->pe_count
 		);
-		if (VASIZE(pv->free_ranges)) {
-			printf("\t\t%u Free Ranges:\n",(unsigned)VASIZE(pv->free_ranges));
-			for (size_t rnum=0;rnum<VASIZE(pv->free_ranges);++rnum) {
-				struct range * r=&VAACCESS(pv->free_ranges,rnum);
+		if (VASIZE(pvic->free_ranges)) {
+			printf("\t\t%u Free Ranges:\n", (unsigned)VASIZE(pvic->free_ranges));
+			for (size_t rnum = 0; rnum < VASIZE(pvic->free_ranges); ++rnum) {
+				struct range * r = &VAACCESS(pvic->free_ranges, rnum);
 				eprintf("\t\t\t%10llu..%10llu[%9llu]\n",(unsigned long long)r->offset,(unsigned long long)(r->offset+r->size-1),(unsigned long long)r->size);
 			}
 		}
@@ -1146,21 +1149,21 @@ static struct bdev * lvm_init(struct bdev_driver * bdev_driver,char * name,const
 		 * This is where the lv name will be read from the backlink 
 		 * pointer.
 		 */
-		char * name=(char *)lvs[i]->vg;
+		char * lv_name = (char *)lvs[i]->vg;
 		lvs[i]->vg=lvm;
 		lvs[i]->lvnum=i;
 		++lvm->refcount;
 		struct bdev * dev;
 		if (!(dev=bdev_register_bdev(
 			bdev_driver,
-			name,
+			lv_name,
 			size,
 			bdev_get_block_size(lvm->bdev[0]),
 			lv_destroy,
 			lvs[i]
 		))) {
-			ERRORF("Couldn't register %s.",name);
-			free(name);
+			ERRORF("Couldn't register %s.", lv_name);
+			free(lv_name);
 			--lvm->refcount;
 			free(lvs[i]);
 			for (++i;i<nlvs;++i) {
