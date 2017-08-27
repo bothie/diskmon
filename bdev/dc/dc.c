@@ -182,9 +182,9 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver,char * name,cons
 			unsigned long o;
 			if (!parse_unsigned_long(&p,&o) && pwerrno) {
 				ERRORF(
-					"Couldn't parse offset ([%s]) for %ith device (%s): %s."
+					"Couldn't parse offset ([%s]) for %lluth device (%s): %s."
 					, p
-					, VASIZE(device)
+					, (unsigned long long)VASIZE(device)
 					, name
 					, pwerror(pwerrno)
 				);
