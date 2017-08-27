@@ -3,13 +3,14 @@
 #include "common.h"
 #include "bdev.h"
 
+#include <avl.h>
 #include <btfileio.h>
 #include <btlock.h>
 #include <btstr.h>
+#include <btthread.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <object.h>
-#include <set.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -17,7 +18,7 @@
 
 #define DRIVER_NAME "cache"
 
-#define DEBUG_DATA_PTR_T
+#define DEBUG_DATA_PTR_T 1
 
 #define MAX_BLOCKS_CACHED 1024*1024 // 512 MB with 512 byte blocks
 
@@ -70,7 +71,7 @@ int block_lookup_compare(const void * _e1, const void * _e2) {
 }
 
 BDEV_INIT {
-	if (!(block_lookup_obj_type = obj_mk_type_1("block lookup", block_lookup_compare))
+	if (!(block_lookup_obj_type = obj_mk_type_3("block lookup", block_lookup_compare))
 	||  !bdev_register_driver(DRIVER_NAME, &bdev_init)) {
 		ERRORF("Couldn't register driver %s", DRIVER_NAME);
 	} else {
@@ -110,14 +111,83 @@ struct bdev_private {
 	size_t next_read_index;
 	size_t num_blocks_cached;
 	
-	struct set * block_lookup_set;
-	VASIAR(block_t) first_access;
+	struct avl_tree * block_lookup_set;
+#if THREADS
+	struct thread_ctx * thread_ctx;
+#endif // #if THREADS
 };
+
+struct populate_block_lookup_set {
+	struct bdev_private * private;
+	const char * name;
+};
+
+static void do_populate_block_lookup_set(struct populate_block_lookup_set * arg) {
+	unsigned char * info_file_data;
+	int info_file_size;
+	
+	info_file_data = (unsigned char *)read_entire_file(arg->private->old.info_fd, &info_file_size);
+	close(arg->private->old.info_fd);
+	arg->private->old.info_fd = -1;
+	
+	if (!info_file_data) {
+		NOTIFYF("%s:%s: Couldn't read old info file %s: %s.", DRIVER_NAME, arg->name, arg->private->old.info_file_name, strerror(errno));
+		return;
+	}
+	
+	int i = 0;
+	int entry = 0;
+	while ((int)(i + sizeof(block_t) + sizeof(unsigned long)) <= info_file_size) {
+		struct block_lookup_entry * ble = malloc(sizeof(*ble));
+		if (!ble) {
+			ERRORF(
+				"%s:%s: bdev_init: Couldn't alloc memory: %s."
+				, DRIVER_NAME, arg->name, strerror(errno)
+			);
+			goto aborted;
+		}
+		block_t block = *(block_t *)(info_file_data + i); i += sizeof(block_t);
+		ble->old_entry = entry++;
+		ble->new_entry = -1;
+		ble->block = block;
+		if (!avl_add(arg->private->block_lookup_set, ble)) {
+			ERRORF(
+				"%s:%s: bdev_init: Couldn't add entry for block %llu to block lookup set."
+				, DRIVER_NAME, arg->name, (unsigned long long)ble->block
+			);
+			goto aborted;
+		}
+		struct entry * e = &VANEW(arg->private->old.data);
+		e->block = block;
+		e->data = NULL;
+		e->num_accesses = *(unsigned long *)(info_file_data + i); i += sizeof(unsigned long);
+	}
+	
+	if (i != info_file_size) {
+		NOTIFYF("%s:%s: Info file has bogus size %i. Something dividable by %i was expected.", DRIVER_NAME, arg->name, info_file_size, (int)(sizeof(block_t) + sizeof(unsigned long)));
+	}
+	
+aborted: ;
+	free(info_file_data);
+	
+	NOTIFYF("%s:%s: Info file reading and processing completed.", DRIVER_NAME, arg->name);
+	
+	btlock_unlock(arg->private->lock);
+}
+
+#if THREADS
+static THREAD_RETURN_TYPE populate_block_lookup_set(THREAD_ARGUMENT_TYPE _arg) {
+	do_populate_block_lookup_set(_arg);
+	THREAD_RETURN();
+}
+#endif // #if THREADS
 
 // cache:blah=\"backing_bdev\" \"cache_files_directory\"
 //
 // name will be reowned by init, args will be freed by the caller.
 static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, const char * args) {
+	struct populate_block_lookup_set * populate_block_lookup_set_arg = NULL;
+	
 	char * info_file_name = NULL;
 	char * data_file_name = NULL;
 	
@@ -131,8 +201,6 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 	private->old.data_fd = -1;
 	private->new.info_fd = -1;
 	private->new.data_fd = -1;
-	
-	VAINIT(private->first_access);
 	
 	private->lock = btlock_lock_mk();
 	if (!private->lock) {
@@ -247,45 +315,16 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 	}
 	
 go_on_without_new: ;
-	int info_file_size;
-	unsigned char * info_file_data;
-	if (private->old.info_fd != -1) {
-		info_file_data = (unsigned char *)read_entire_file(private->old.info_fd, &info_file_size);
-		close(private->old.info_fd);
-		if (!info_file_data) {
-			ERRORF("%s:%s: Couldn't read old info file %s: %s.", DRIVER_NAME, name, private->old.info_file_name, strerror(errno));
-			goto err;
-		}
-	} else {
-		info_file_size = 0;
-		info_file_data = NULL;
+	populate_block_lookup_set_arg = malloc(sizeof(*populate_block_lookup_set_arg));
+	if (!populate_block_lookup_set_arg) {
+		NOTIFYF("%s:%s: Couldn't malloc: %s\n", DRIVER_NAME, name, strerror(errno));
+		goto err;
 	}
 	
-	private->block_lookup_set = set_mk(block_lookup_obj_type);
-	
-	int i = 0;
-	int entry = 0;
-	while ((int)(i + sizeof(block_t) + sizeof(unsigned long)) <= info_file_size) {
-		struct entry * e = &VANEW(private->old.data);
-		e->block = *(block_t *)(info_file_data + i); i += sizeof(block_t);
-		e->data = NULL;
-		e->num_accesses = *(unsigned long *)(info_file_data + i); i += sizeof(unsigned long);
-		struct block_lookup_entry * ble = malloc(sizeof(*ble));
-		ble->old_entry = entry++;
-		ble->new_entry = -1;
-		ble->block = e->block;
-		if (!set_add(private->block_lookup_set, ble)) {
-			ERRORF(
-				"%s:%s: bdev_init: Couldn't add entry for block %llu to block lookup set."
-				, DRIVER_NAME, name, (unsigned long long)ble->block
-			);
-			goto err;
-		}
-	}
-	free(info_file_data);
-	
-	if (i != info_file_size) {
-		NOTIFYF("%s:%s: Info file has bogus size %i. Something dividable by %i was expected.", DRIVER_NAME, name, info_file_size, (int)(sizeof(block_t) + sizeof(unsigned long)));
+	private->block_lookup_set = avl_mk_tree(block_lookup_obj_type);
+	if (!private->block_lookup_set) {
+		ERRORF("%s:%s: Couldn't create block lookup entry set: %s.", DRIVER_NAME, name, strerror(errno));
+		goto err;
 	}
 	
 	char * target_name = NULL;
@@ -295,6 +334,8 @@ go_on_without_new: ;
 		target_name = mprintf("%s.%u", name, ++num);
 	} while (!bdev_rename_bdev(private->backing_storage, target_name));
 	NOTIFYF("%s:%s: Renamed backing storage bdev to %s.\n", DRIVER_NAME, name, target_name);
+	
+	btlock_lock(private->lock);
 	
 	struct bdev * retval = bdev_register_bdev(
 		bdev_driver,
@@ -309,6 +350,19 @@ go_on_without_new: ;
 		goto err;
 	}
 	
+	if (private->old.info_fd != -1) {
+		populate_block_lookup_set_arg->private = private;
+		populate_block_lookup_set_arg->name = name;
+		
+#if THREADS
+		NOTIFYF("%s:%s: Populating block lookup set in separate thread.", DRIVER_NAME, name);
+		private->thread_ctx = create_thread(65536, populate_block_lookup_set, (THREAD_ARGUMENT_TYPE)populate_block_lookup_set_arg);
+#else // #if THREADS
+		NOTIFYF("%s:%s: Populating block lookup set in main thread.", DRIVER_NAME, name);
+		do_populate_block_lookup_set(populate_block_lookup_set_arg);
+#endif // #if THREADS, else
+	}
+	
 	bdev_set_read_function(retval, cache_read);
 	bdev_set_write_function(retval, cache_write);
 	
@@ -320,6 +374,7 @@ go_on_without_new: ;
 err:
 	free(info_file_name);
 	free(data_file_name);
+	free(populate_block_lookup_set_arg);
 	
 	if (private) {
 		cache_destroy_private(private);
@@ -329,6 +384,13 @@ err:
 }
 
 static bool cache_destroy_private(struct bdev_private * private) {
+	btlock_lock(private->lock);
+	btlock_unlock(private->lock);
+	
+#if THREADS
+	cleanup_thread(private->thread_ctx);
+#endif // #if THREADS
+	
 	btlock_lock_free(private->lock);
 	
 	for (size_t i = VASIZE(private->old.data); i--; ) {
@@ -347,7 +409,7 @@ static bool cache_destroy_private(struct bdev_private * private) {
 	
 	free(private->cache_files_directory);
 	
-	set_free(private->block_lookup_set);
+	avl_free(private->block_lookup_set);
 	
 	free(private);
 	
@@ -359,11 +421,11 @@ static bool cache_destroy(struct bdev * bdev) {
 	return cache_destroy_private(private);
 }
 
-#ifdef DEBUG_DATA_PTR_T
+#if DEBUG_DATA_PTR_T
 typedef struct {
-#else // #ifdef DEBUG_DATA_PTR_T
+#else // #if DEBUG_DATA_PTR_T
 typedef union {
-#endif // #ifdef DEBUG_DATA_PTR_T, else
+#endif // #if DEBUG_DATA_PTR_T, else
 	      unsigned char * wptr;
 	const unsigned char * rptr;
 } data_ptr_t;
@@ -413,7 +475,7 @@ static bool access_one_block(
 	
 	struct block_lookup_entry ble_search;
 	ble_search.block = block;
-	struct block_lookup_entry * ble = set_find(private->block_lookup_set, &ble_search);
+	struct block_lookup_entry * ble = avl_find(private->block_lookup_set, &ble_search);
 	bool kill_ble = false;
 	if (!ble) {
 		block_t r = bdev_read(private->backing_storage, block, 1, data.wptr, reason);
@@ -433,7 +495,7 @@ static bool access_one_block(
 		ble->old_entry = -1;
 		ble->new_entry = -1;
 		
-		if (!set_add(private->block_lookup_set, ble)) {
+		if (!avl_add(private->block_lookup_set, ble)) {
 			ERRORF("%s:%s: Couldn't add block %llu (%p) to block lookup table: %s.", DRIVER_NAME, bdev_get_name(bdev), (unsigned long long)ble->block, (void *)ble, strerror(errno));
 			kill_ble = true;
 			unlink(private->new.info_file_name); close(private->new.info_fd); private->new.info_fd = -1;
@@ -585,9 +647,9 @@ static block_t access_blocks(
 
 static block_t cache_read(struct bdev * bdev, block_t first, block_t num, unsigned char * data, const char * reason) {
 	data_ptr_t data_ptr;
-#ifdef DEBUG_DATA_PTR_T
+#if DEBUG_DATA_PTR_T
 	data_ptr.rptr = NULL;
-#endif // #ifdef DEBUG_DATA_PTR_T
+#endif // #if DEBUG_DATA_PTR_T
 	data_ptr.wptr = data;
 	
 	return access_blocks(bdev, first, num, data_ptr, reason, false);
@@ -595,9 +657,9 @@ static block_t cache_read(struct bdev * bdev, block_t first, block_t num, unsign
 
 static block_t cache_write(struct bdev * bdev, block_t first, block_t num, const unsigned char * data) {
 	data_ptr_t data_ptr;
-#ifdef DEBUG_DATA_PTR_T
+#if DEBUG_DATA_PTR_T
 	data_ptr.wptr = NULL;
-#endif // #ifdef DEBUG_DATA_PTR_T
+#endif // #if DEBUG_DATA_PTR_T
 	data_ptr.rptr = data;
 	
 	return access_blocks(bdev, first, num, data_ptr, NULL, true);
