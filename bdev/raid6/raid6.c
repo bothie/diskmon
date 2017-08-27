@@ -974,7 +974,9 @@ print_err:
 					 */
 					free(disk_device_name);
 					disk_device_name=NULL;
-					free(private->disk[d].sb.v0); private->disk[d].sb.v0=NULL;
+					do {
+						free(private->disk[d].sb.v0); private->disk[d].sb.v0=NULL;
+					} while (d--);
 					goto restart;
 				}
 				
