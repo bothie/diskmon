@@ -51,7 +51,7 @@ checker: main.o
 
 CPPFLAGS-main.o = -Ibdev
 
-LDFLAGS-checker = -Lbdev -lbdev
+LDFLAGS-checker = -Lbdev -lbdev -ldl
 
 LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L$(TOPDIR)/btlib
 
