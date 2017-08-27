@@ -506,7 +506,6 @@ restart:
 //	struct softraid_superblock_1 * sb1=NULL; // warning: 'sb1' may be used uninitialized in this function
 	unsigned nb=1;
 	
-	char * disk_device_name=NULL;
 	unsigned block_size=0; // warning: 'block_size' may be used uninitialized in this function
 	while (*p) {
 		// Annahme: nr_disks=active_disks+failed_disks+spare_disks
@@ -1274,7 +1273,6 @@ err:
 		free(private);
 		free(name);
 	}
-	free(disk_device_name);
 	
 	return NULL;
 }
