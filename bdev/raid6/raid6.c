@@ -3318,3 +3318,20 @@ static block_t raid6_data_write(struct bdev * bdev, block_t first, block_t num, 
 	
 	return retval;
 }
+
+/*
+ * Bogus function only to prevent warnings about static raid6_read, raid6_data_read, raid6_write, raid6_data_write not being used
+ */
+int foo() {
+	void (*p[4])();
+	p[0] = (void (*)())raid6_read;
+	p[1] = (void (*)())raid6_data_read;
+	p[2] = (void (*)())raid6_write;
+	p[3] = (void (*)())raid6_data_write;
+	unsigned char * cp = (unsigned char *)p;
+	int sum = 0;
+	for (size_t i = 0; i < sizeof(p); ++i) {
+		sum += cp[i];
+	}
+	return sum;
+}
