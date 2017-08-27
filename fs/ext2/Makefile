@@ -53,6 +53,7 @@ CFLAGS += -fno-early-inlining
 
 CPPFLAGS += \
 	-I$(TOPDIR)/btlib \
+	-D__FUNCTION__=__func__ \
 
 LDFLAGS += \
 	-LBtLinuxLibrary -lBtLinuxLibrary \
