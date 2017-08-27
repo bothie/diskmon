@@ -124,7 +124,7 @@ struct populate_block_lookup_set {
 
 static void do_populate_block_lookup_set(struct populate_block_lookup_set * arg) {
 	unsigned char * info_file_data;
-	int info_file_size;
+	size_t info_file_size;
 	
 	info_file_data = (unsigned char *)read_entire_file(arg->private->old.info_fd, &info_file_size);
 	close(arg->private->old.info_fd);
@@ -137,7 +137,7 @@ static void do_populate_block_lookup_set(struct populate_block_lookup_set * arg)
 	
 	int i = 0;
 	int entry = 0;
-	while ((int)(i + sizeof(block_t) + sizeof(unsigned long)) <= info_file_size) {
+	while (i + sizeof(block_t) + sizeof(unsigned long) <= info_file_size) {
 		struct block_lookup_entry * ble = malloc(sizeof(*ble));
 		if (!ble) {
 			ERRORF(
@@ -163,8 +163,8 @@ static void do_populate_block_lookup_set(struct populate_block_lookup_set * arg)
 		e->num_accesses = *(unsigned long *)(info_file_data + i); i += sizeof(unsigned long);
 	}
 	
-	if (i != info_file_size) {
-		NOTIFYF("%s:%s: Info file has bogus size %i. Something dividable by %i was expected.", DRIVER_NAME, arg->name, info_file_size, (int)(sizeof(block_t) + sizeof(unsigned long)));
+	if ((size_t)i != info_file_size) {
+		NOTIFYF("%s:%s: Info file has bogus size %zu. Something dividable by %zu was expected.", DRIVER_NAME, arg->name, info_file_size, sizeof(block_t) + sizeof(unsigned long));
 	}
 	
 aborted: ;

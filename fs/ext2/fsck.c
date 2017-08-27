@@ -763,8 +763,8 @@ recheck_compat_flags:
 		);
 	}
 	
-	if (sc->sb->num_clusters!=bdev_get_size(sc->bdev)/sc->cluster_size_Blocks) {
-		if (sc->sb->num_clusters>bdev_get_size(sc->bdev)/sc->cluster_size_Blocks) {
+	if ((block_t)sc->sb->num_clusters!=bdev_get_size(sc->bdev)/sc->cluster_size_Blocks) {
+		if ((block_t)sc->sb->num_clusters>bdev_get_size(sc->bdev)/sc->cluster_size_Blocks) {
 			ERRORF(
 				"%s: num_clusters is %lu, should be %llu"
 				,sc->name

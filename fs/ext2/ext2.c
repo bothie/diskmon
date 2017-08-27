@@ -343,7 +343,7 @@ bool read_table_for_one_group(struct scan_context * sc, bool prefetching) {
 					}
 				} else {
 					if ((sc->table_reader_group
-					||   i>=(sc->sb->first_inode-1)/4)
+					||   i >= ((block_t)sc->sb->first_inode - 1) / 4)
 					&&  j==512) {
 						expect_zeros=true;
 					}
@@ -2503,18 +2503,18 @@ bool ext2_dump_file_by_inode(struct scan_context * fs, u32 ino, const char * fil
 		u32 absolute_cluster = ext2_inode_translate_cluster(inode, cluster, bdev_msg_for_translate);
 		free(bdev_msg_for_translate);
 		if (absolute_cluster && absolute_cluster != (u32)-1) {
-			size_t num_blocks;
+			block_t num_blocks;
 			if (cluster + 1 == num_clusters) {
 				num_blocks = last_num_blocks;
 			} else {
 				num_blocks = cs;
 			}
-			for (block_t relative_block = 0; relative_block < (u32)num_blocks; ++relative_block) {
+			for (block_t relative_block = 0; relative_block < num_blocks; ++relative_block) {
 				u32 lba = cs * absolute_cluster + relative_block;
 				block_t r = bdev_read(fs->bdev, lba, 1, buffer, bdev_msg);
 				size_t num_bytes;
 				if (cluster + 1 == (u32)num_clusters
-				&&  relative_block + 1 == (u32)num_blocks) {
+				&&  relative_block + 1 == num_blocks) {
 					num_bytes = last_num_bytes;
 				} else {
 					num_bytes = bs;

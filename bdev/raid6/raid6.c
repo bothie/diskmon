@@ -739,7 +739,7 @@ print_err:
 					goto err;
 				}
 				
-				if (private->disk[d].sb.v0->sb0_size*2+128 > bdev_get_size(private->disk[d].bdev)) {
+				if ((block_t)private->disk[d].sb.v0->sb0_size * 2 + 128 > bdev_get_size(private->disk[d].bdev)) {
 					ERROR("According to super block the device has to be bigger as it actually is.");
 					goto print_err;
 				}
