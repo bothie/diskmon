@@ -73,6 +73,11 @@ int block_lookup_compare(const void * _e1, const void * _e2) {
 BDEV_INIT {
 	if (!(block_lookup_obj_type = obj_mk_type_3("block lookup", block_lookup_compare))
 	||  !bdev_register_driver(DRIVER_NAME, &bdev_init)) {
+		if (block_lookup_obj_type) {
+			obj_free(block_lookup_obj_type);
+			
+			block_lookup_obj_type = NULL;
+		}
 		ERRORF("Couldn't register driver %s", DRIVER_NAME);
 	} else {
 		initialized=true;
@@ -82,8 +87,17 @@ BDEV_INIT {
 BDEV_FINI {
 	if (initialized) {
 		bdev_deregister_driver(DRIVER_NAME);
+		
+		/*
+		 * It seems atexit functions are called prior to .fini on dl'loaded libs.
+		 * btlib's refcounter uses atexit to clean up.
+		 * We use .fini to clean up refcounter after refcounter already has been cleaned up.
+		 * Not a good idea ...
+		 * So, let's skip this for now.
+		
+		obj_free(block_lookup_obj_type);
+		 */
 	}
-	obj_free(block_lookup_obj_type);
 }
 
 /*
@@ -201,6 +215,9 @@ static struct bdev * bdev_init(struct bdev_driver * bdev_driver, char * name, co
 	private->old.data_fd = -1;
 	private->new.info_fd = -1;
 	private->new.data_fd = -1;
+	
+	private->block_lookup_set = NULL;
+	private->cache_files_directory = NULL;
 	
 	private->lock = btlock_lock_mk();
 	if (!private->lock) {
@@ -384,14 +401,16 @@ err:
 }
 
 static bool cache_destroy_private(struct bdev_private * private) {
-	btlock_lock(private->lock);
-	btlock_unlock(private->lock);
+	if (private->lock) {
+		btlock_lock(private->lock);
+		btlock_unlock(private->lock);
+		
+		btlock_lock_free(private->lock);
+	}
 	
 #if THREADS
 	cleanup_thread(private->thread_ctx);
 #endif // #if THREADS
-	
-	btlock_lock_free(private->lock);
 	
 	for (size_t i = VASIZE(private->old.data); i--; ) {
 		free(VAACCESS(private->old.data, i).data);
@@ -409,7 +428,7 @@ static bool cache_destroy_private(struct bdev_private * private) {
 	
 	free(private->cache_files_directory);
 	
-	avl_free(private->block_lookup_set);
+	if (private->block_lookup_set) avl_free(private->block_lookup_set);
 	
 	free(private);
 	
