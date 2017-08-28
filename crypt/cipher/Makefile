@@ -29,10 +29,11 @@ SOFLAGS += -L.. -lcrypt
 
 CPPFLAGS-aes.o += -I.. -I../..
 
-CPPFLAGS += 
-# -I$(TOPDIR)/btlib
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
-# -L$(TOPDIR)/btlib -lbt 
+CPPFLAGS += \
+	-I$(TOPDIR)/btlib \
+
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

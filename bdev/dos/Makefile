@@ -20,9 +20,14 @@ SRCS = \
 LIBTARGET = dos
 SOTARGET = dos.so
 
-CFLAGS += -I.. -I../..
+CPPFLAGS += \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/btlib \
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+LDFLAGS += \
+	-L$(TOPDIR)/bdev \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

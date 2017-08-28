@@ -39,16 +39,56 @@ endif # ifdef THREADS, else
 
 SRCS = \
 	$(SRCS-THREADS) \
-
-#	btlock.c \
-#	btstr_mmemcpy.c \
-#	bttime_mstrftime.c \
-#	parseutil_parse_c_string.c \
-#	vasiar.c \
+	avl.c \
+	avl_do_find.c \
+	avl_do_insert.c \
+	avl_dump_tree.c \
+	avl_find.c \
+	avl_free.c \
+	avl_insert.c \
+	avl_insert_rc.c \
+	avl_mk_tree.c \
+	avl_mk_tree_rc.c \
+	avl_node_find_authority.c \
+	avl_node_free.c \
+	avl_node_free_recursive.c \
+	avl_rc_find.c \
+	avl_remove.c \
+	avl_remove_rc.c \
+	avl_size.c \
+	bterror.c \
+	btfileio_fdprintf.c \
+	btfileio_read_entire_file.c \
+	btfileio_vfdprintf.c \
+	btlock.c \
+	btmacros_null_pointer.c \
+	btmath.c \
+	btsf.c \
+	btstr_concat.c \
+	btstr_mmemcpy.c \
+	btstr_mstrcpy.c \
+	btstr_strstartcmp.c \
+	bttime_mstrftime.c \
+	mprintf.c \
+	object.c \
+	object_avl_node_memory_management.c \
+	parseutil_parse_c_string.c \
+	parseutil_parse_skip.c \
+	parseutil_parse_skip_string.c \
+	parseutil_parse_string.c \
+	parseutil_parse_unsigned_long.c \
+	parseutil_parse_unsigned_long_long.c \
+	parseutil_pwe_invalid_char.c \
+	parseutil_pwerrno.c \
+	parseutil_pwerror.c \
+	refcounter.c \
+	stddbg.c \
+	vasiar.c \
 
 LIBTARGET = bt
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+CPPFLAGS += \
+	-I. \
 
 include $(shell btmakefile --path)/Makefile.Include
 

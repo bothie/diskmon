@@ -53,7 +53,11 @@ CPPFLAGS-main.o = -Ibdev
 
 LDFLAGS-checker = -Lbdev -lbdev -ldl
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L$(TOPDIR)/btlib
+CPPFLAGS += \
+	-I$(TOPDIR)/btlib \
+
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 /Makefile.Include:
 	@echo "This program needs the project btmakefile installed on your"

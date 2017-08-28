@@ -21,9 +21,14 @@ LIBTARGET = ebsiv
 SOTARGET = ebsiv.so
 SOFLAGS += -liv
 
-CPPFLAGS += -I.. -I../../.. -I../../../.. -I../../../../crypt
+CPPFLAGS += \
+	-I.. \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/crypt \
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L..
+LDFLAGS += \
+	-L.. \
 
 include $(shell btmakefile --path)/Makefile.Include
 

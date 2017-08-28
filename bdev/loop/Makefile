@@ -19,14 +19,14 @@ SRCS = \
 
 LIBTARGET = loop
 SOTARGET = loop.so
-# SOFLAGS += -L.. -lbdev
 
-CPPFLAGS-loop.o += -I.. -I../.. -I../../btlib
+CPPFLAGS += \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/btlib \
 
-CPPFLAGS += 
-# -I$(TOPDIR)/btlib
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
-# -L$(TOPDIR)/btlib -lbt
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

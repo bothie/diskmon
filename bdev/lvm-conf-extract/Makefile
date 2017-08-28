@@ -19,11 +19,14 @@ SRCS = \
 
 LIBTARGET = lvm-conf-extract
 SOTARGET = lvm-conf-extract.so
-# SOFLAGS += -L.. -lbdev
 
-CPPFLAGS += -I.. -I../..
+CPPFLAGS += \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/btlib \
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

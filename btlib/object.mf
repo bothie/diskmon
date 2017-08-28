@@ -1,0 +1,66 @@
+/*
+ * object.mf. Part of the bothie-utils.
+ *
+ * Copyright (C) <=2007-2015 Bodo Thiesen <bothie@gmx.de>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
+#ifndef MEMBER_PROCEDURE_1
+#define MEMBER_PROCEDURE_1 MEMBER_FUNCTIONS_1
+#endif // #ifndef MEMBER_PROCEDURE_1
+
+#ifndef MEMBER_PROCEDURE_2
+#define MEMBER_PROCEDURE_2 MEMBER_FUNCTIONS_2
+#endif // #ifndef MEMBER_PROCEDURE_2
+
+#ifndef MEMBER_PROCEDURE_3
+#define MEMBER_PROCEDURE_3 MEMBER_FUNCTIONS_3
+#endif // #ifndef MEMBER_PROCEDURE_3
+
+/*
+ */
+MEMBER_FUNCTIONS_2(int, compare, const object_t *, const object_t *)
+
+/*
+ */
+MEMBER_PROCEDURE_1(void, free, object_t *)
+
+/*
+ * Output a summary. The output must be written to a newly malloc()ed string 
+ * and MUST NOT contain any new line characters. (i.e. the output should be 
+ * at most one line). The output should be as short as possible.
+ */
+MEMBER_FUNCTIONS_1(char *, display, const object_t *)
+
+/*
+ * Output the entire content of the object. The output must be written to a 
+ * newly malloc()ed string.
+ */
+MEMBER_FUNCTIONS_1(char *, print, const object_t *)
+
+#if defined(BTLINUXLIBRARY_OBJECT_PRIVATE_H) || defined(BTLINUXLIBRARY_AVL_PRIVATE_H)
+
+MEMBER_FUNCTIONS_2(struct avl_node *, avl_node_new, void *, object_t *)
+MEMBER_PROCEDURE_3(void, avl_node_free, void *, object_t *, struct avl_node *)
+
+#endif // #if defined(BTLINUXLIBRARY_OBJECT_PRIVATE_H) || defined(BTLINUXLIBRARY_AVL_PRIVATE_H)
+
+#undef MEMBER_FUNCTIONS_1
+#undef MEMBER_PROCEDURE_1
+#undef MEMBER_FUNCTIONS_2
+#undef MEMBER_PROCEDURE_2
+#undef MEMBER_FUNCTIONS_3
+#undef MEMBER_PROCEDURE_3

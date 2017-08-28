@@ -19,10 +19,14 @@ SRCS = \
 
 LIBTARGET = iv
 
-CPPFLAGS += -I../.. -I../../.. -I../../../crypt
+CPPFLAGS += \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/crypt \
+	-I$(TOPDIR)/btlib \
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
-# -L.. -L../../crypt
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

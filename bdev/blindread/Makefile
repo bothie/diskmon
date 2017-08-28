@@ -19,11 +19,14 @@ SRCS = \
 
 LIBTARGET = blindread
 SOTARGET = blindread.so
-# SOFLAGS += -L.. -lbdev
 
-CPPFLAGS += -I.. -I../..
+CPPFLAGS += \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/btlib \
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

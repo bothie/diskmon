@@ -23,7 +23,18 @@ SOFLAGS += -lbdev -lcrypt -liv -lgcrypt
 
 CPPFLAGS += -Iiv -I.. -I../.. -I../../crypt
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L.. -L../../crypt -Liv
+CPPFLAGS += \
+	-Iiv \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/crypt \
+	-I$(TOPDIR)/btlib \
+
+LDFLAGS += \
+	-Liv \
+	-L$(TOPDIR)/bdev \
+	-L$(TOPDIR)/crypt \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

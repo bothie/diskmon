@@ -19,12 +19,14 @@ SRCS = \
 
 LIBTARGET = cache
 SOTARGET = cache.so
-SOFLAGS += -L.. -lbdev
 
-CPPFLAGS-cache.o += -I.. -I../.. -I../../btlib
+CPPFLAGS += \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/btlib \
 
-CPPFLAGS += 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L../../btlib -lbt
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 

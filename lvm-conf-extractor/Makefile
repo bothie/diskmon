@@ -26,7 +26,11 @@ BIN = lvm-conf-extractor
 
 include $(shell btmakefile --path)/Makefile.Include
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary
+CPPFLAGS += \
+	-I$(TOPDIR)/btlib \
+
+LDFLAGS += \
+	-L$(TOPDIR)/btlib -lbt \
 
 /Makefile.Include:
 	@echo "This program needs the project btmakefile installed on your"

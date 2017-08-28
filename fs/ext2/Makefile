@@ -56,7 +56,6 @@ CPPFLAGS += \
 	-D__FUNCTION__=__func__ \
 
 LDFLAGS += \
-	-LBtLinuxLibrary -lBtLinuxLibrary \
 	-L$(TOPDIR)/btlib -lbt \
 	-lrt \
 

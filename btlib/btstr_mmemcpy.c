@@ -22,8 +22,8 @@
 
 #include <string.h>
 
-char * mmemcpy(const char *b,size_t bs) {
-	char *retval=malloc(bs);
+char * mmemcpy(const char * b,size_t bs) {
+	char * retval=malloc(bs);
 	
 	if (expect(retval,1)) {
 		memcpy(retval,b,bs);

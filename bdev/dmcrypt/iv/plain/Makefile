@@ -21,9 +21,16 @@ LIBTARGET = plain
 SOTARGET = plain.so
 SOFLAGS += -liv
 
-CPPFLAGS += -I.. -I../../.. -I../../../.. -I../../../../crypt
+CPPFLAGS += \
+	-I.. \
+	-I$(TOPDIR)/bdev \
+	-I$(TOPDIR) \
+	-I$(TOPDIR)/crypt \
+	-I$(TOPDIR)/btlib \
 
-LDFLAGS += -LBtLinuxLibrary -lBtLinuxLibrary -L..
+LDFLAGS += \
+	-L.. \
+	-L$(TOPDIR)/btlib -lbt \
 
 include $(shell btmakefile --path)/Makefile.Include
 
