@@ -1096,9 +1096,11 @@ print_err:
 		disk_device_name=NULL;
 	} // while (*p)
 #ifndef IGNORE_SUPERBLOCK_DIFFERENCES
-	switch (private->disk[0].sb_version) {
-		case 0: free(private->disk[0].sb.v0); private->disk[0].sb.v0=NULL; break;
-		case 1: free(private->disk[0].sb.v1); private->disk[0].sb.v1=NULL; break;
+	if (d) {
+		switch (private->disk[0].sb_version) {
+			case 0: free(private->disk[0].sb.v0); private->disk[0].sb.v0=NULL; break;
+			case 1: free(private->disk[0].sb.v1); private->disk[0].sb.v1=NULL; break;
+		}
 	}
 #endif // #ifndef IGNORE_SUPERBLOCK_DIFFERENCES
 	
