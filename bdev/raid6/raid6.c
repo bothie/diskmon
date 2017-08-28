@@ -244,8 +244,8 @@ static void print_superblock_v0(struct softraid_superblock_0 * sbv0) {
 		,(unsigned long)sbv0->working_disks
 		,(unsigned long)sbv0->failed_disks
 		,(unsigned long)sbv0->spare_disks
-		,sbv0->events
-		,sbv0->cp_events
+		, (unsigned long long)sbv0->events
+		, (unsigned long long)sbv0->cp_events
 		,(unsigned long)sbv0->recovery_cp
 		,(unsigned long)sbv0->sb0_layout
 		,(unsigned long)sbv0->sb0_chunk_size
@@ -924,9 +924,9 @@ print_err:
 						"disks %s with event counter %llu and "
 						"%s with event counter %llu."
 						,bdev_get_name(private->disk[0].bdev)
-						,private->disk[0].sb.v0->events
+						, (unsigned long long)private->disk[0].sb.v0->events
 						,bdev_get_name(private->disk[d].bdev)
-						,private->disk[d].sb.v0->events
+						, (unsigned long long)private->disk[d].sb.v0->events
 					);
 					print_superblock_v0(private->disk[0].sb.v0);
 					print_superblock_v0(private->disk[d].sb.v0);

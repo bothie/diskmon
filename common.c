@@ -51,17 +51,17 @@ char * mkhrtime(bttime_t t) {
 	if (t>=86400) {
 		return mprintf(
 			"%llu Tage %02llu:%02llu:%02llu"
-			,t/86400
-			,(t/ 3600)%24
-			,(t/   60)%60
-			,(t      )%60
+			,  (unsigned long long)t/86400
+			, ((unsigned long long)t/ 3600)%24
+			, ((unsigned long long)t/   60)%60
+			, ((unsigned long long)t      )%60
 		);
 	} else {
 		return mprintf(
 			"%02llu:%02llu:%02llu"
-			,(t/ 3600)%24
-			,(t/   60)%60
-			,(t      )%60
+			, ((unsigned long long)t/ 3600)%24
+			, ((unsigned long long)t/   60)%60
+			, ((unsigned long long)t      )%60
 		);
 	}
 }
